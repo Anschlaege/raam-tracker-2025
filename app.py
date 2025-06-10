@@ -1,6 +1,6 @@
 """
-RAAM 2025 Live Dashboard - Version 5 (Finaler Debug-Modus)
-Findet und zeigt alle internen Skript-Blöcke zur Analyse an.
+RAAM 2025 Live Dashboard - Version 6 (Finale Version)
+Greift gezielt auf die korrekte Datenquelle (mainpoints.js) zu.
 """
 
 import streamlit as st
@@ -12,7 +12,6 @@ from datetime import datetime
 import requests
 import re
 import json
-from bs4 import BeautifulSoup
 
 # Seiten-Konfiguration
 st.set_page_config(
@@ -30,104 +29,87 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- NEUE, ZWEISTUFIGE DATENABRUF-FUNKTIONEN (MIT VERBESSERTEM DEBUGGING) ---
+# --- FINALE, KORREKTE DATENABRUF-FUNKTIONEN ---
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=45) # Cache für 45 Sekunden
 def fetch_trackleaders_data():
     """
-    Holt Live-Daten in einem robusten, zweistufigen Prozess:
-    1. Finde die URL zur JSON-Datei auf der Haupt-Tracking-Seite.
-    2. Rufe die gefundene JSON-URL direkt ab.
-    Enthält verbessertes Debugging, das alle Skript-Inhalte anzeigt.
+    Holt die Live-Daten gezielt aus der 'mainpoints.js'-Datei von TrackLeaders.
     """
-    base_url = "https://trackleaders.com"
-    tracker_page_url = f"{base_url}/raam25f.php"
+    data_url = "https://trackleaders.com/spot/raam25/mainpoints.js"
     
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': tracker_page_url
+        'Referer': 'https://trackleaders.com/raam25f.php'
     }
 
     try:
-        # --- SCHRITT 1: Finde die URL der JSON-Datei ---
-        st.info(f"Schritt 1: Lade Tracker-Seite: `{tracker_page_url}`")
-        page_response = requests.get(tracker_page_url, headers=headers, timeout=15)
-        
-        if page_response.status_code != 200:
-            st.error(f"Fehler bei Schritt 1: Haupt-Tracker-Seite nicht erreichbar. Status: {page_response.status_code}")
+        response = requests.get(data_url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            st.error(f"Fehler beim Abrufen der Datendatei. Status Code: {response.status_code}")
             return None
 
-        # Suche nach einem Muster, das auf die JSON-Datei verweist.
-        patterns = [
-            r'"(spot/[^"]+/full\.json)"',     # Generisches 'spot' Muster
-            r'"([^"]+-all\.json)"',           # Generisches '-all.json' Muster
-            r'src\s*=\s*"([^"]+\.json)"'      # Generisches Muster für jede .json Datei
-        ]
+        # Die .js-Datei enthält Daten in einer JavaScript-Variable, z.B. "var markers = [...]"
+        # Wir extrahieren das Array mit einem regulären Ausdruck.
+        match = re.search(r'var\s+markers\s*=\s*(\[.*?\]);', response.text, re.DOTALL)
         
-        json_url_path = None
-        for pattern in patterns:
-            match = re.search(pattern, page_response.text)
-            if match:
-                json_url_path = match.group(1)
-                st.success(f"Erfolg! JSON-Pfad direkt gefunden: **{json_url_path}**")
-                break
-        
-        if not json_url_path:
-            st.error("Fehler bei Schritt 1: Konnte den Pfad zur JSON-Datei mit Regex nicht finden. Analysiere jetzt die Skript-Blöcke...")
-            
-            # --- VERBESSERTES DEBUGGING ---
-            # Wenn kein Muster passt, zeige den Inhalt aller internen Skripte an.
-            soup = BeautifulSoup(page_response.text, 'html.parser')
-            inline_scripts = soup.find_all('script', src=False) # Finde Skripts ohne 'src' Attribut
-
-            if not inline_scripts:
-                st.warning("Es wurden keine internen Skript-Blöcke im HTML gefunden.")
-                return None
-
-            st.warning("Bitte kopiere den Inhalt des relevantesten der folgenden Skript-Blöcke:")
-            for i, script in enumerate(inline_scripts):
-                if script.string: # Nur anzeigen, wenn Inhalt vorhanden ist
-                    st.subheader(f"Inhalt von internem Skript-Block #{i+1}")
-                    st.code(script.string, language='javascript')
-            return None # Stoppe die Ausführung hier, da wir auf die Analyse warten
-
-        # --- SCHRITT 2: Wenn der Pfad gefunden wurde, fahre fort ---
-        full_json_url = f"{base_url}/{json_url_path}" if not json_url_path.startswith('http') else json_url_path
-
-        st.info(f"Schritt 2: Rufe Daten von **{full_json_url}** ab...")
-        data_response = requests.get(full_json_url, headers=headers, timeout=15)
-        
-        if data_response.status_code == 200:
-            data = data_response.json()
-            if data and 'features' in data:
-                st.success("Daten erfolgreich abgerufen und verarbeitet!")
-                return parse_geojson_data(data['features'])
-        else:
-            st.error(f"Fehler bei Schritt 2: Konnte die JSON-Datei nicht abrufen. Status: {data_response.status_code}")
+        if not match:
+            st.error("Konnte die 'markers'-Variable in der mainpoints.js nicht finden.")
             return None
+
+        js_data_string = match.group(1)
+
+        # Konvertiere den JavaScript-String in valides JSON:
+        # 1. Setze Keys in Anführungszeichen (z.B. name: -> "name":)
+        # 2. Ersetze einfache Anführungszeichen durch doppelte
+        json_str = re.sub(r'([{,]\s*)(\w+):', r'\1"\2":', js_data_string)
+        json_str = re.sub(r"'", '"', json_str)
+        
+        # Entferne das letzte Komma in Objekten, falls vorhanden (z.B. {..., "key":"val",})
+        json_str = re.sub(r',\s*([\}\]])', r'\1', json_str)
+
+        data = json.loads(json_str)
+        return parse_marker_data(data)
 
     except requests.exceptions.RequestException as e:
         st.error(f"Ein Netzwerkfehler ist aufgetreten: {e}")
     except json.JSONDecodeError:
-        st.error("Fehler beim Verarbeiten der JSON-Antwort.")
+        st.error("Fehler beim Verarbeiten der JSON-Antwort. Der Regex zur Konvertierung war nicht erfolgreich.")
+        st.code(json_str[:1000]) # Zeige den fehlerhaften JSON-String zum Debuggen
+    except Exception as e:
+        st.error(f"Ein unerwarteter Fehler ist aufgetreten: {e}")
     
     return None
 
-
-def parse_geojson_data(features):
+def parse_marker_data(raw_data):
+    """Verarbeitet die Daten aus dem 'markers'-Array."""
     racers = []
-    for item in features:
-        props = item.get('properties', {})
-        coords = item.get('geometry', {}).get('coordinates', [0, 0])
-        if 'name' in props and 'cat' in props and 'solo' in props.get('cat', '').lower():
-            racer = {
-                'name': props.get('name', 'N/A'), 'bib': str(props.get('bib', '')), 'category': props.get('cat', 'SOLO'),
-                'position': 999, 'distance': float(props.get('dist', 0)), 'speed': float(props.get('spd', 0)),
-                'location': props.get('loc', ''), 'lat': float(coords[1]) if coords else 0, 'lon': float(coords[0]) if coords else 0,
-                'time_behind': props.get('gap', ''), 'elapsed_time': props.get('elapsed', ''), 'last_update': props.get('ts', '') 
-            }
-            racers.append(racer)
-    if not racers: return None
+    for item in raw_data:
+        # Nur Fahrer mit Status "Live" und Kategorie "SOLO" berücksichtigen
+        if item.get('status') == 'Live' and 'solo' in item.get('cat', '').lower():
+            try:
+                racer = {
+                    'name': item.get('name', 'N/A'),
+                    'bib': str(item.get('bib', '')),
+                    'category': item.get('cat', 'SOLO'),
+                    'position': 999,
+                    'distance': float(item.get('dist', 0)),
+                    'speed': float(item.get('spd', 0)),
+                    'location': item.get('loc', ''),
+                    'lat': float(item.get('lat', 0)),
+                    'lon': float(item.get('lon', 0)),
+                    'time_behind': '', # In diesem Format oft nicht direkt verfügbar
+                    'elapsed_time': item.get('elapsed', ''),
+                    'last_update': item.get('ts', '') 
+                }
+                racers.append(racer)
+            except (ValueError, TypeError):
+                # Ignoriere Einträge, die nicht korrekt konvertiert werden können
+                continue
+
+    if not racers:
+        return None
+
     df = pd.DataFrame(racers)
     if not df.empty:
         df = df.sort_values(by='distance', ascending=False).reset_index(drop=True)
@@ -136,6 +118,7 @@ def parse_geojson_data(features):
     return None
 
 def create_dataframe(racers_data):
+    """Erstellt und bereitet DataFrame vor."""
     if not racers_data: return pd.DataFrame()
     df = pd.DataFrame(racers_data)
     df['is_fritz'] = df['name'].str.lower().str.contains('fritz|geers|gers', na=False, regex=True)
@@ -144,6 +127,7 @@ def create_dataframe(racers_data):
     return df
 
 def calculate_statistics(df):
+    """Berechnet zusätzliche Statistiken."""
     if df.empty: return df
     leader = df.iloc[0]
     if 'distance' in df.columns:
@@ -160,28 +144,26 @@ def main():
         st.cache_data.clear()
         st.rerun()
     
-    auto_refresh = st.sidebar.checkbox("Auto-Refresh (60 Sek)", value=True)
+    auto_refresh = st.sidebar.checkbox("Auto-Refresh (45 Sek)", value=True)
     
     st.sidebar.markdown("---")
     st.sidebar.info("**Live-Daten** von TrackLeaders\n\n**Fritz Geers** wird mit ⭐ hervorgehoben")
     
     st.title("🏆 Race Across America 2025 - Live Tracking")
     
-    racers_data = fetch_trackleaders_data()
+    with st.spinner("Lade Live-Daten von TrackLeaders..."):
+        racers_data = fetch_trackleaders_data()
     
     if racers_data:
-        # Dieser Teil wird nur ausgeführt, wenn fetch_trackleaders_data erfolgreich ist
+        st.success("Live-Daten erfolgreich geladen!")
         df = create_dataframe(racers_data)
         df = calculate_statistics(df)
         
         st.markdown(f"*Aktualisiert: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}*")
         
         if df.empty:
-            st.warning("Keine Solo-Fahrer in den Live-Daten gefunden.")
+            st.warning("Keine Solo-Fahrer in den Live-Daten gefunden oder alle sind 'Scratch'.")
         else:
-            # Komplette UI-Anzeige wie zuvor...
-            # (Rest des main-Codes ist unverändert und hier aus Kürzungsgründen weggelassen,
-            # aber im obigen Block vollständig enthalten)
             fritz_data = df[df['is_fritz']]
             
             if not fritz_data.empty:
@@ -198,11 +180,38 @@ def main():
                 st.warning("⚠️ Fritz Geers wurde in den Live-Daten nicht gefunden.")
             
             st.markdown("---")
-            # ... Rest der UI (Tabs, etc.)
+            tab1, tab2, tab3, tab4 = st.tabs(["📊 Live Rangliste", "🗺️ Karte", "📈 Statistiken", "📡 Rohdaten"])
             
-    if auto_refresh and racers_data:
-        st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
-        st.sidebar.info("🔄 Nächstes Update in 60 Sekunden...")
-
-if __name__ == "__main__":
-    main() # Gekürzte Main-Funktion hier, im Code-Block oben ist sie vollständig
+            with tab1:
+                st.subheader("Live Rangliste - Solo Kategorie")
+                display_cols = ['position', 'name', 'distance', 'speed', 'location', 'gap_miles', 'elapsed_time', 'is_fritz']
+                display_df = df.reindex(columns=display_cols).copy()
+                display_df.columns = ['Pos', 'Name', 'Distanz (mi)', 'Geschw. (mph)', 'Standort', 'Rückstand', 'Zeit', 'is_fritz']
+                def highlight_fritz(row):
+                    return ['background-color: #ffd700'] * len(row) if row['is_fritz'] else [''] * len(row)
+                styled_df = display_df.drop('is_fritz', axis=1).style.apply(highlight_fritz, axis=1)
+                st.dataframe(styled_df, use_container_width=True, height=600)
+                csv = display_df.drop('is_fritz', axis=1).to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Download CSV", csv, f"raam_live_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "text/csv")
+            
+            with tab2:
+                st.subheader("Live Positionen auf der Karte")
+                map_df = df[(df['lat'] != 0) & (df['lon'] != 0)]
+                if not map_df.empty:
+                    m = folium.Map(location=[38.0, -97.0], zoom_start=4)
+                    for _, racer in map_df.iterrows():
+                        color = 'gold' if racer['is_fritz'] else 'blue'
+                        icon = 'star' if racer['is_fritz'] else 'bicycle'
+                        popup_html = f"""<b>{'⭐ ' if racer['is_fritz'] else ''}{racer['name']}</b><br>
+                                       Position: #{racer['position']}<br>
+                                       Distanz: {racer['distance']:.1f} mi"""
+                        folium.Marker([racer['lat'], racer['lon']], popup=folium.Popup(popup_html, max_width=300),
+                                      tooltip=f"{racer['name']} (#{racer['position']})",
+                                      icon=folium.Icon(color=color, prefix='fa', icon=icon)).add_to(m)
+                    st_folium(m, height=600, width=None)
+                else:
+                    st.info("Keine GPS-Koordinaten in den Live-Daten verfügbar.")
+            
+            with tab3:
+                st.subheader("Live Statistiken")
+                cols = st.columns(4)
