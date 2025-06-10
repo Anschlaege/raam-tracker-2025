@@ -1,8 +1,8 @@
 """
-RAAM 2025 Live Dashboard - Version 19 (Lokale Zeit & Wetter-Export)
-- Zeigt die lokale Uhrzeit an Fritz Geers' Position an.
-- Fügt Fritz' Wetterdaten zur Discord-Benachrichtigung hinzu.
-- Benötigt die zusätzlichen Bibliotheken: pytz, timezonefinder
+RAAM 2025 Live Dashboard - Version 20 (Finale Version)
+- UI-Anzeige für Tabs wiederhergestellt.
+- Datum und Uhrzeit zur Discord-Benachrichtigung hinzugefügt.
+- Alle Features kombiniert.
 """
 
 import streamlit as st
@@ -48,11 +48,15 @@ def get_weather_data(lat, lon):
     except Exception: return None
 
 def send_to_discord_as_file(webhook_url, df, weather_data):
-    """Sendet die komplette Rangliste als CSV-Datei und eine Wetter-Zusammenfassung an Discord."""
+    """Sendet die komplette Rangliste als CSV-Datei und eine Zusammenfassung an Discord."""
     if df.empty: return {"status": "error", "message": "DataFrame ist leer."}
 
-    # Erstelle die Nachricht mit Wetter-Kontext
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # Erstelle einen detaillierten Zeitstempel auf Deutsch
+    days_de = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+    now = datetime.now()
+    day_name = days_de[now.weekday()]
+    timestamp_str = now.strftime(f"{day_name}, %d.%m.%Y um %H:%M Uhr")
+
     weather_summary = "Wetterdaten für Fritz nicht verfügbar."
     if weather_data and all(v is not None for v in weather_data.values()):
         weather_summary = (f"Aktuelles Wetter an Fritz' Position: "
@@ -60,12 +64,12 @@ def send_to_discord_as_file(webhook_url, df, weather_data):
                            f"{weather_data['humidity']}% Luftfeuchtigkeit, "
                            f"{weather_data['precipitation']}mm Niederschlag.")
     
-    content = (f"**RAAM Live-Export vom {timestamp}**\n\n"
+    content = (f"**RAAM Live-Export vom {timestamp_str}**\n\n"
                f"🌦️ {weather_summary}\n\n"
                f"Die vollständige Rangliste befindet sich im Anhang.")
 
     csv_data = df.to_csv(index=False, encoding='utf-8')
-    file_name = f"raam_live_export_{timestamp}.csv"
+    file_name = f"raam_live_export_{now.strftime('%Y%m%d_%H%M')}.csv"
     payload_json = {"content": content, "username": "RAAM Live Tracker", "avatar_url": "https://i.imgur.com/4M34hi2.png"}
     files = {'file': (file_name, csv_data, 'text/csv')}
     
@@ -74,7 +78,6 @@ def send_to_discord_as_file(webhook_url, df, weather_data):
         return {"status": "success", "message": f"Datei '{file_name}' erfolgreich gesendet!"} if 200 <= response.status_code < 300 else {"status": "error", "message": f"Discord-Fehler: {response.status_code}"}
     except requests.exceptions.RequestException as e: return {"status": "error", "message": f"Netzwerkfehler: {e}"}
 
-# (Datenabruf- und Verarbeitungsfunktionen bleiben gleich)
 @st.cache_data(ttl=45)
 def fetch_trackleaders_data():
     data_url = "https://trackleaders.com/spot/raam25/mainpoints.js"
@@ -143,32 +146,25 @@ def main():
     racers_data = fetch_trackleaders_data()
     
     if not racers_data:
-        st.warning("Momentan konnten keine verarbeitbaren Live-Daten gefunden werden."); return
+        st.warning("Momentan konnten keine verarbeitbaren Live-Daten gefunden werden. Versuche es in Kürze erneut.")
+        if auto_refresh: st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
+        return
 
     df = create_dataframe(racers_data)
     df = calculate_statistics(df)
+    
     st.success(f"{len(df)} Solo-Fahrer geladen!")
+    st.markdown(f"*Aktualisiert: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}*")
     
     fritz_data = df[df['is_fritz']]
+    # Initialisiere weather_data außerhalb des if-Blocks, um es später für den Export zu verwenden
+    weather_data = None
     if not fritz_data.empty:
         fritz = fritz_data.iloc[0]
         weather_data = get_weather_data(fritz.get('lat'), fritz.get('lon'))
         local_time = get_local_time(fritz.get('lat'), fritz.get('lon'))
         
-        # Discord-Button in der Sidebar
-        try:
-            webhook_url = st.secrets["DISCORD_WEBHOOK_URL"]
-            st.sidebar.markdown("---"); st.sidebar.header("Export")
-            if st.sidebar.button("Export an Discord senden"):
-                with st.spinner("Sende an Discord..."):
-                    result = send_to_discord_as_file(webhook_url, df, weather_data)
-                    if result.get("status") == "success": st.sidebar.success(result.get("message"))
-                    else: st.sidebar.error(result.get("message"))
-        except KeyError: pass
-            
-        st.markdown(f"*Aktualisiert: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}*")
         st.markdown("### ⭐ Fritz Geers Live Status")
-        
         cols = st.columns(6)
         cols[0].metric("Position", f"#{fritz['position']}")
         cols[1].metric("Distanz", f"{fritz['distance']:.1f} mi")
@@ -182,9 +178,52 @@ def main():
             w_cols[0].metric("Temperatur", f"{weather_data['temperature']} °C")
             w_cols[1].metric("Luftfeuchtigkeit", f"{weather_data['humidity']}%")
             w_cols[2].metric("Niederschlag (1h)", f"{weather_data['precipitation']} mm")
+    
+    # Discord-Button in der Sidebar (wird jetzt immer angezeigt, wenn Daten da sind)
+    try:
+        webhook_url = st.secrets["DISCORD_WEBHOOK_URL"]
+        st.sidebar.markdown("---")
+        st.sidebar.header("Export")
+        if st.sidebar.button("Export an Discord senden"):
+            with st.spinner("Sende CSV an Discord..."):
+                result = send_to_discord_as_file(webhook_url, df, weather_data)
+                if result.get("status") == "success": st.sidebar.success(result.get("message"))
+                else: st.sidebar.error(result.get("message"))
+    except KeyError: pass
             
     st.markdown("---")
-    # ... Restliche UI (Tabs)
+    # --- WIEDERHERGESTELLTE UI-TABS ---
+    tab1, tab2, tab3 = st.tabs(["📊 Live Rangliste", "🗺️ Karte", "📈 Statistiken"])
     
+    with tab1:
+        st.subheader("Live Rangliste - Solo Kategorie")
+        display_cols = ['position', 'bib', 'name', 'distance', 'speed', 'gap_to_fritz', 'is_fritz']
+        display_df = df.reindex(columns=display_cols, fill_value="")
+        display_df.rename(columns={'position': 'Pos', 'bib': 'Nr.', 'name': 'Name', 'distance': 'Distanz (mi)', 'speed': 'Geschw. (mph)', 'gap_to_fritz': 'Abstand zu Fritz'}, inplace=True)
+        def highlight_fritz(row): return ['background-color: #ffd700'] * len(row) if row.is_fritz else [''] * len(row)
+        st.dataframe(display_df.style.apply(highlight_fritz, axis=1), use_container_width=True, height=800, column_config={"is_fritz": None})
+
+    with tab2:
+        st.subheader("Live Positionen auf der Karte")
+        map_df = df[df['lat'] != 0]
+        if not map_df.empty:
+            m = folium.Map(location=[map_df['lat'].mean(), map_df['lon'].mean()], zoom_start=6)
+            for _, r in map_df.iterrows():
+                folium.Marker([r['lat'], r['lon']], 
+                              popup=f"<b>{r['name']}</b><br>Pos: #{r['position']}<br>Dist: {r['distance']:.1f} mi",
+                              tooltip=f"#{r['position']} {r['name']}",
+                              icon=folium.Icon(color='gold' if r['is_fritz'] else 'blue', icon='star' if r['is_fritz'] else 'bicycle', prefix='fa')).add_to(m)
+            st_folium(m, height=600, width=None)
+
+    with tab3:
+        st.subheader("Top 10 nach Distanz")
+        top10 = df.head(10).sort_values('distance', ascending=True)
+        fig = px.bar(top10, y='name', x='distance', orientation='h', text='distance', labels={'name': 'Fahrer', 'distance': 'Distanz (Meilen)'})
+        fig.update_traces(texttemplate='%{text:.1f} mi', textposition='outside')
+        st.plotly_chart(fig, use_container_width=True)
+
+    if auto_refresh:
+        st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
+
 if __name__ == "__main__":
     main()
