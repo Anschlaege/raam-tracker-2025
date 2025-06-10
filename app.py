@@ -14,7 +14,7 @@ import re
 import json
 
 # --- NEUE FUNKTION FÜR DISCORD ---
-def send_to_discord(https://discord.com/api/webhooks/1382134686704209920/blMqtY1Qr453JGTcClfiGu9G-vCZsrkkNRKnYaPJlh0hm4qoSgzVjH9kwnCHiYC6SKpt, df):
+def send_to_discord(webhook_url, df):
     """Formatiert die Top-Fahrer und sendet sie an einen Discord-Webhook."""
     if df.empty:
         return {"status": "error", "message": "DataFrame ist leer."}
