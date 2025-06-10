@@ -1,8 +1,7 @@
 """
-RAAM 2025 Live Dashboard - Version 20 (Finale Version)
-- UI-Anzeige für Tabs wiederhergestellt.
-- Datum und Uhrzeit zur Discord-Benachrichtigung hinzugefügt.
-- Alle Features kombiniert.
+RAAM 2025 Live Dashboard - Version 21 (Finale Version)
+- Discord-Nachricht verwendet jetzt Berliner Zeit (CEST/CET).
+- Alle anderen Features bleiben erhalten.
 """
 
 import streamlit as st
@@ -21,41 +20,35 @@ from pytz import timezone
 
 @st.cache_data(ttl=600)
 def get_local_time(lat, lon):
-    """Ermittelt die lokale Zeitzone und Uhrzeit für eine gegebene Position."""
     if lat is None or lon is None: return "N/A"
     try:
         tf = TimezoneFinder()
         tz_name = tf.timezone_at(lng=lon, lat=lat)
         if tz_name:
-            local_tz = timezone(tz_name)
-            local_time = datetime.now(local_tz)
-            return local_time.strftime('%H:%M %Z')
+            return datetime.now(timezone(tz_name)).strftime('%H:%M %Z')
         return "N/A"
-    except Exception:
-        return "N/A"
+    except Exception: return "N/A"
 
 @st.cache_data(ttl=600)
 def get_weather_data(lat, lon):
-    """Ruft aktuelle Wetterdaten ab."""
     if lat is None or lon is None: return None
     try:
-        api_url = "https://api.open-meteo.com/v1/forecast"
         params = {"latitude": lat, "longitude": lon, "current": "temperature_2m,relative_humidity_2m,precipitation","temperature_unit": "celsius", "precipitation_unit": "mm"}
-        response = requests.get(api_url, params=params, timeout=10)
+        response = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=10)
         response.raise_for_status()
         current = response.json().get('current', {})
         return {'temperature': current.get('temperature_2m'),'humidity': current.get('relative_humidity_2m'),'precipitation': current.get('precipitation')}
     except Exception: return None
 
 def send_to_discord_as_file(webhook_url, df, weather_data):
-    """Sendet die komplette Rangliste als CSV-Datei und eine Zusammenfassung an Discord."""
     if df.empty: return {"status": "error", "message": "DataFrame ist leer."}
 
-    # Erstelle einen detaillierten Zeitstempel auf Deutsch
+    # Holen und formatieren der Zeit für die Zeitzone Berlin
+    berlin_tz = timezone('Europe/Berlin')
+    now_berlin = datetime.now(berlin_tz)
     days_de = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
-    now = datetime.now()
-    day_name = days_de[now.weekday()]
-    timestamp_str = now.strftime(f"{day_name}, %d.%m.%Y um %H:%M Uhr")
+    day_name = days_de[now_berlin.weekday()]
+    timestamp_str = now_berlin.strftime(f"{day_name}, %d.%m.%Y um %H:%M Uhr")
 
     weather_summary = "Wetterdaten für Fritz nicht verfügbar."
     if weather_data and all(v is not None for v in weather_data.values()):
@@ -64,18 +57,18 @@ def send_to_discord_as_file(webhook_url, df, weather_data):
                            f"{weather_data['humidity']}% Luftfeuchtigkeit, "
                            f"{weather_data['precipitation']}mm Niederschlag.")
     
-    content = (f"**RAAM Live-Export vom {timestamp_str}**\n\n"
+    content = (f"**RAAM Live-Export vom {timestamp_str} (Berliner Zeit)**\n\n"
                f"🌦️ {weather_summary}\n\n"
                f"Die vollständige Rangliste befindet sich im Anhang.")
 
     csv_data = df.to_csv(index=False, encoding='utf-8')
-    file_name = f"raam_live_export_{now.strftime('%Y%m%d_%H%M')}.csv"
+    file_name = f"raam_live_export_{now_berlin.strftime('%Y%m%d_%H%M')}.csv"
     payload_json = {"content": content, "username": "RAAM Live Tracker", "avatar_url": "https://i.imgur.com/4M34hi2.png"}
     files = {'file': (file_name, csv_data, 'text/csv')}
     
     try:
         response = requests.post(webhook_url, data={'payload_json': json.dumps(payload_json)}, files=files, timeout=15)
-        return {"status": "success", "message": f"Datei '{file_name}' erfolgreich gesendet!"} if 200 <= response.status_code < 300 else {"status": "error", "message": f"Discord-Fehler: {response.status_code}"}
+        return {"status": "success", "message": f"Datei '{file_name}' gesendet!"} if 200 <= response.status_code < 300 else {"status": "error", "message": f"Discord-Fehler: {response.status_code}"}
     except requests.exceptions.RequestException as e: return {"status": "error", "message": f"Netzwerkfehler: {e}"}
 
 @st.cache_data(ttl=45)
@@ -157,7 +150,6 @@ def main():
     st.markdown(f"*Aktualisiert: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}*")
     
     fritz_data = df[df['is_fritz']]
-    # Initialisiere weather_data außerhalb des if-Blocks, um es später für den Export zu verwenden
     weather_data = None
     if not fritz_data.empty:
         fritz = fritz_data.iloc[0]
@@ -179,11 +171,9 @@ def main():
             w_cols[1].metric("Luftfeuchtigkeit", f"{weather_data['humidity']}%")
             w_cols[2].metric("Niederschlag (1h)", f"{weather_data['precipitation']} mm")
     
-    # Discord-Button in der Sidebar (wird jetzt immer angezeigt, wenn Daten da sind)
     try:
         webhook_url = st.secrets["DISCORD_WEBHOOK_URL"]
-        st.sidebar.markdown("---")
-        st.sidebar.header("Export")
+        st.sidebar.markdown("---"); st.sidebar.header("Export")
         if st.sidebar.button("Export an Discord senden"):
             with st.spinner("Sende CSV an Discord..."):
                 result = send_to_discord_as_file(webhook_url, df, weather_data)
@@ -192,7 +182,6 @@ def main():
     except KeyError: pass
             
     st.markdown("---")
-    # --- WIEDERHERGESTELLTE UI-TABS ---
     tab1, tab2, tab3 = st.tabs(["📊 Live Rangliste", "🗺️ Karte", "📈 Statistiken"])
     
     with tab1:
@@ -209,10 +198,7 @@ def main():
         if not map_df.empty:
             m = folium.Map(location=[map_df['lat'].mean(), map_df['lon'].mean()], zoom_start=6)
             for _, r in map_df.iterrows():
-                folium.Marker([r['lat'], r['lon']], 
-                              popup=f"<b>{r['name']}</b><br>Pos: #{r['position']}<br>Dist: {r['distance']:.1f} mi",
-                              tooltip=f"#{r['position']} {r['name']}",
-                              icon=folium.Icon(color='gold' if r['is_fritz'] else 'blue', icon='star' if r['is_fritz'] else 'bicycle', prefix='fa')).add_to(m)
+                folium.Marker([r['lat'], r['lon']], popup=f"<b>{r['name']}</b><br>Pos: #{r['position']}<br>Dist: {r['distance']:.1f} mi", tooltip=f"#{r['position']} {r['name']}", icon=folium.Icon(color='gold' if r['is_fritz'] else 'blue', icon='star' if r['is_fritz'] else 'bicycle', prefix='fa')).add_to(m)
             st_folium(m, height=600, width=None)
 
     with tab3:
