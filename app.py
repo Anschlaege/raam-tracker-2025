@@ -1,7 +1,7 @@
 """
-RAAM 2025 Live Dashboard - Version 17 (Finale, funktionierende Version)
-- Verwendet einen robusten, mehrstufigen Parser, der auf die exakte Datenstruktur zugeschnitten ist.
-- Filtert korrekt nur aktive Solo-Fahrer.
+RAAM 2025 Live Dashboard - Version 18 (Discord-Export wiederhergestellt)
+- Fügt die Export-Funktion zu Discord via Webhook wieder hinzu.
+- Die Nachricht fokussiert sich auf die Fahrer rund um Fritz Geers.
 """
 
 import streamlit as st
@@ -13,6 +13,50 @@ from datetime import datetime
 import requests
 import re
 
+# --- FUNKTION FÜR DISCORD-BENACHRICHTIGUNG ---
+def send_to_discord(webhook_url, df):
+    """Formatiert eine Übersicht rund um Fritz und sendet sie an einen Discord-Webhook."""
+    if df.empty:
+        return {"status": "error", "message": "DataFrame ist leer."}
+
+    # Finde Fritz, um eine kontextbezogene Übersicht zu erstellen
+    fritz_index_list = df[df['is_fritz']].index.tolist()
+    if not fritz_index_list:
+        # Fallback: Wenn Fritz nicht gefunden wird, sende die Top 10
+        display_df = df.head(10)
+        title = "RAAM 2025 - Top 10 Update"
+    else:
+        # Erstelle ein Fenster von Fahrern um Fritz herum
+        fritz_pos_index = fritz_index_list[0]
+        start_index = max(0, fritz_pos_index - 3)
+        end_index = min(len(df), fritz_pos_index + 6) # 5 Fahrer hinter Fritz
+        display_df = df.iloc[start_index:end_index]
+        title = "RAAM 2025 - Update rund um Fritz Geers"
+
+    # Erstelle einen schön formatierten Text für Discord
+    message_content = f"```\n{title}\n"
+    message_content += "---------------------------------------\n"
+    
+    # Wähle die Spalten für die kompakte Darstellung aus
+    export_cols = ['position', 'name', 'distance', 'speed', 'gap_to_fritz']
+    message_content += display_df[export_cols].to_string(index=False)
+    message_content += "\n```"
+
+    payload = {
+        "content": message_content,
+        "username": "RAAM Live Tracker",
+        "avatar_url": "https://i.imgur.com/4M34hi2.png" # Fahrrad-Icon
+    }
+
+    try:
+        response = requests.post(webhook_url, json=payload, timeout=10)
+        if 200 <= response.status_code < 300:
+            return {"status": "success", "message": "Daten erfolgreich an Discord gesendet!"}
+        else:
+            return {"status": "error", "message": f"Discord-Fehler: {response.status_code}, {response.text}"}
+    except requests.exceptions.RequestException as e:
+        return {"status": "error", "message": f"Netzwerkfehler beim Senden: {e}"}
+
 # Seiten-Konfiguration
 st.set_page_config(
     page_title="RAAM 2025 Live Tracker - Fritz Geers",
@@ -20,81 +64,59 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# Custom CSS
-st.markdown("""
-<style>
-    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 5px; }
-</style>
-""", unsafe_allow_html=True)
+st.markdown("""<style>.stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 5px; }</style>""", unsafe_allow_html=True)
 
 
 @st.cache_data(ttl=45)
 def fetch_trackleaders_data():
-    """Lädt die mainpoints.js und übergibt den Roh-Text an den Parser."""
     data_url = "https://trackleaders.com/spot/raam25/mainpoints.js"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': 'https://trackleaders.com/raam25f.php'}
-
     try:
         response = requests.get(data_url, headers=headers, timeout=20)
         response.raise_for_status()
-        return parse_js_code_data(response.text)
+        js_content = response.text
+        pattern = re.compile(
+            r"L\.marker\(\[([\d.-]+),\s*([\d.-]+)\].*?"
+            r"bindTooltip\(\"<b>\(([\w\d]+)\)\s*(.*?)<\/b>.*?"
+            r"([\d.]+)\s*mph at route mile ([\d.]+)",
+            re.DOTALL
+        )
+        matches = pattern.findall(js_content)
+        if not matches:
+            st.error("Datenabruf erfolgreich, aber es konnten keine Fahrer-Daten im JavaScript-Code gefunden werden.")
+            return None
+        return parse_js_code_data(matches)
     except requests.exceptions.RequestException as e:
-        st.error(f"Netzwerkfehler: {e}")
+        st.error(f"Netzwerk- oder Verbindungsfehler: {e}")
     except Exception as e:
         st.error(f"Ein unerwarteter Fehler ist aufgetreten: {e}")
     return None
 
 def parse_js_code_data(js_content):
-    """
-    Parst den rohen JavaScript-Inhalt, indem er ihn in Blöcke aufteilt
-    und jeden Block einzeln mit gezielten Regex-Mustern analysiert.
-    """
     racers = []
-    # Teile die Datei in Blöcke, einen für jeden Fahrer. Der Split-Punkt ist verlässlich.
     racer_blocks = js_content.split('markers.push(')
-
     for block in racer_blocks:
         try:
-            # Extrahiere alle benötigten Informationen mit einzelnen, kleinen Regex-Mustern.
             status = re.search(r"\.mystatus\s*=\s*'(.*?)';", block).group(1)
             category = re.search(r"\.mycategory\s*=\s*'(.*?)';", block).group(1)
-            
-            # Überspringe alle, die nicht aktive Solo-Fahrer sind.
-            if status != 'Active' or category != 'Solo':
-                continue
-
+            if status != 'Active' or category != 'Solo': continue
             lat_lon = re.search(r"L\.marker\(\[([\d.-]+),\s*([\d.-]+)\]", block)
             tooltip = re.search(r"bindTooltip\(\"<b>\(([\w\d]+)\)\s*(.*?)<\/b>.*?<br>([\d.]+)\s*mph at route mile ([\d.]+)", block)
-            
-            if not all([lat_lon, tooltip]):
-                continue
-
+            if not all([lat_lon, tooltip]): continue
             racers.append({
-                'lat': float(lat_lon.group(1)),
-                'lon': float(lat_lon.group(2)),
-                'bib': tooltip.group(1),
-                'name': tooltip.group(2).strip(),
-                'speed': float(tooltip.group(3)),
-                'distance': float(tooltip.group(4)),
-                'category': category,
-                'position': 999, 'location': '', 'time_behind': '', 
+                'lat': float(lat_lon.group(1)), 'lon': float(lat_lon.group(2)), 'bib': tooltip.group(1),
+                'name': tooltip.group(2).strip(), 'speed': float(tooltip.group(3)), 'distance': float(tooltip.group(4)),
+                'category': category, 'position': 999, 'location': '', 'time_behind': '', 
                 'elapsed_time': '', 'last_update': '' 
             })
         except (AttributeError, ValueError, IndexError):
-            # Ignoriere Blöcke, die nicht das erwartete Format haben
             continue
-    
-    if not racers:
-        st.warning("Daten heruntergeladen, aber keine passenden Fahrer (Status: Active, Kategorie: Solo) gefunden.")
-        return None
-        
+    if not racers: return None
     df = pd.DataFrame(racers).sort_values(by='distance', ascending=False).reset_index(drop=True)
     df['position'] = df.index + 1
     return df.to_dict('records')
 
 def create_dataframe(racers_data):
-    """Erstellt DataFrame und identifiziert Fritz Geers via Startnummer #675."""
     if not racers_data: return pd.DataFrame()
     df = pd.DataFrame(racers_data)
     df['is_fritz'] = (df['bib'] == '675') | (df['name'].str.lower().str.contains('fritz|geers|gers', na=False, regex=True))
@@ -103,7 +125,6 @@ def create_dataframe(racers_data):
     return df
 
 def calculate_statistics(df):
-    """Berechnet Abstände zum Führenden und zu Fritz."""
     if df.empty: return df
     leader = df.iloc[0]
     df['gap_to_leader'] = leader['distance'] - df['distance']
@@ -147,6 +168,22 @@ def main():
         st.success(f"{len(racers_data)} Solo-Fahrer erfolgreich aus Live-Daten extrahiert!")
         df = create_dataframe(racers_data)
         df = calculate_statistics(df)
+        
+        # --- EXPORT-BEREICH IN DER SIDEBAR ---
+        st.sidebar.markdown("---")
+        st.sidebar.header("Export & Benachrichtigung")
+        try:
+            webhook_url = st.secrets["DISCORD_WEBHOOK_URL"]
+            if st.sidebar.button("Update an Discord senden"):
+                with st.spinner("Sende an Discord..."):
+                    result = send_to_discord(webhook_url, df)
+                    if result["status"] == "success":
+                        st.sidebar.success(result["message"])
+                    else:
+                        st.sidebar.error(result["message"])
+        except KeyError:
+            st.sidebar.error("Discord Webhook URL nicht in den Secrets gefunden.")
+        
         st.markdown(f"*Aktualisiert: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}*")
         
         fritz_data = df[df['is_fritz']]
@@ -169,18 +206,9 @@ def main():
             st.subheader("Live Rangliste - Solo Kategorie")
             display_cols = ['position', 'bib', 'name', 'distance', 'speed', 'gap_to_fritz', 'is_fritz']
             display_df = df.reindex(columns=display_cols, fill_value="")
-            display_df.rename(columns={
-                'position': 'Pos', 'bib': 'Nr.', 'name': 'Name', 
-                'distance': 'Distanz (mi)', 'speed': 'Geschw. (mph)', 
-                'gap_to_fritz': 'Abstand zu Fritz'
-            }, inplace=True)
-            
-            def highlight_fritz(row):
-                return ['background-color: #ffd700'] * len(row) if row.is_fritz else [''] * len(row)
-            
-            st.dataframe(display_df.style.apply(highlight_fritz, axis=1), 
-                         use_container_width=True, height=800,
-                         column_config={"is_fritz": None}) # Versteckt die Hilfsspalte stabil
+            display_df.rename(columns={'position': 'Pos', 'bib': 'Nr.', 'name': 'Name', 'distance': 'Distanz (mi)', 'speed': 'Geschw. (mph)', 'gap_to_fritz': 'Abstand zu Fritz'}, inplace=True)
+            def highlight_fritz(row): return ['background-color: #ffd700'] * len(row) if row.is_fritz else [''] * len(row)
+            st.dataframe(display_df.style.apply(highlight_fritz, axis=1), use_container_width=True, height=800, column_config={"is_fritz": None})
 
         with tab2:
             st.subheader("Live Positionen auf der Karte")
@@ -191,18 +219,15 @@ def main():
                     folium.Marker([r['lat'], r['lon']], 
                                   popup=f"<b>{r['name']}</b><br>Pos: #{r['position']}<br>Dist: {r['distance']:.1f} mi",
                                   tooltip=f"#{r['position']} {r['name']}",
-                                  icon=folium.Icon(color='gold' if r['is_fritz'] else 'blue', 
-                                                   icon='star' if r['is_fritz'] else 'bicycle', prefix='fa')).add_to(m)
+                                  icon=folium.Icon(color='gold' if r['is_fritz'] else 'blue', icon='star' if r['is_fritz'] else 'bicycle', prefix='fa')).add_to(m)
                 st_folium(m, height=600, width=None)
 
         with tab3:
             st.subheader("Top 10 nach Distanz")
             top10 = df.head(10).sort_values('distance', ascending=True)
-            fig = px.bar(top10, y='name', x='distance', orientation='h', text='distance',
-                         labels={'name': 'Fahrer', 'distance': 'Distanz (Meilen)'})
+            fig = px.bar(top10, y='name', x='distance', orientation='h', text='distance', labels={'name': 'Fahrer', 'distance': 'Distanz (Meilen)'})
             fig.update_traces(texttemplate='%{text:.1f} mi', textposition='outside')
             st.plotly_chart(fig, use_container_width=True)
-
     else:
         st.warning("Es konnten keine verarbeitbaren Daten gefunden werden.")
 
