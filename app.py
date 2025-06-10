@@ -1,5 +1,6 @@
 """
-RAAM 2025 Live Dashboard - Mit verbesserter Fehlerbehandlung
+RAAM 2025 Live Dashboard - Web Scraping Version
+Extrahiert Daten direkt von der TrackLeaders Webseite
 """
 
 import streamlit as st
@@ -10,8 +11,9 @@ import folium
 from streamlit_folium import st_folium
 from datetime import datetime
 import requests
-import json
 from bs4 import BeautifulSoup
+import re
+import json
 
 # Seiten-Konfiguration
 st.set_page_config(
@@ -30,363 +32,328 @@ st.markdown("""
         border-radius: 5px;
         font-weight: bold;
     }
+    .metric-container {
+        padding: 10px;
+        background-color: #f0f2f6;
+        border-radius: 10px;
+        margin: 5px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# Datenbank-Funktionen
-@st.cache_resource
-def init_connection():
-    """Erstellt eine neue SQLite Datenbank-Verbindung"""
-    conn = sqlite3.connect(':memory:', check_same_thread=False)
-    return conn
-
-def create_tables(conn):
-    """Erstellt die benötigten Tabellen"""
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS racers (
-            bib_number TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            category TEXT,
-            country TEXT,
-            is_fritz_geers BOOLEAN DEFAULT 0
-        )
-    ''')
-    
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS positions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME NOT NULL,
-            bib_number TEXT NOT NULL,
-            latitude REAL,
-            longitude REAL,
-            distance_miles REAL,
-            speed_mph REAL,
-            elevation_ft INTEGER,
-            checkpoint TEXT,
-            rank INTEGER,
-            time_behind_leader TEXT,
-            FOREIGN KEY (bib_number) REFERENCES racers(bib_number)
-        )
-    ''')
-    
-    conn.commit()
+# Demo-Daten für Entwicklung
+DEMO_DATA = [
+    {
+        'name': 'Fritz Geers',
+        'bib': '001',
+        'category': 'SOLO',
+        'position': 3,
+        'distance': 156.8,
+        'speed': 12.4,
+        'location': 'Flagstaff, AZ',
+        'lat': 35.1983,
+        'lon': -111.6513
+    },
+    {
+        'name': 'John Smith',
+        'bib': '002', 
+        'category': 'SOLO',
+        'position': 1,
+        'distance': 189.2,
+        'speed': 14.8,
+        'location': 'Prescott, AZ',
+        'lat': 34.5400,
+        'lon': -112.4685
+    },
+    {
+        'name': 'Maria Rodriguez',
+        'bib': '003',
+        'category': 'SOLO',
+        'position': 2,
+        'distance': 178.5,
+        'speed': 13.9,
+        'location': 'Flagstaff, AZ',
+        'lat': 35.1983,
+        'lon': -111.6513
+    },
+    {
+        'name': 'Peter Mueller',
+        'bib': '004',
+        'category': 'SOLO', 
+        'position': 4,
+        'distance': 145.2,
+        'speed': 11.8,
+        'location': 'Williams, AZ',
+        'lat': 35.2494,
+        'lon': -112.1910
+    },
+    {
+        'name': 'Sarah Johnson',
+        'bib': '005',
+        'category': 'SOLO',
+        'position': 5,
+        'distance': 134.7,
+        'speed': 10.9,
+        'location': 'Ash Fork, AZ',
+        'lat': 35.2253,
+        'lon': -112.4838
+    }
+]
 
 @st.cache_data(ttl=300)  # Cache für 5 Minuten
-def fetch_live_data():
-    """Holt Live-Daten von TrackLeaders mit verschiedenen Methoden"""
-    
-    # Debug-Informationen
-    debug_info = []
-    
-    # Methode 1: Direkte JSON API
-    urls_to_try = [
-        "https://trackleaders.com/raam25f.php?format=json",
-        "https://trackleaders.com/raam25.json",
-        "https://trackleaders.com/api/v1/race/raam25/leaderboard",
-        "https://trackleaders.com/raam25/api/leaderboard.json"
-    ]
-    
-    for url in urls_to_try:
-        try:
-            debug_info.append(f"Versuche URL: {url}")
-            response = requests.get(url, 
-                                  timeout=10,
-                                  headers={'User-Agent': 'Mozilla/5.0'})
-            
-            debug_info.append(f"Status Code: {response.status_code}")
-            debug_info.append(f"Content-Type: {response.headers.get('content-type', 'N/A')}")
-            
-            if response.status_code == 200:
-                # Versuche als JSON zu parsen
-                try:
-                    data = response.json()
-                    debug_info.append("✓ JSON erfolgreich geparst")
-                    return data, debug_info
-                except json.JSONDecodeError:
-                    debug_info.append("✗ JSON Parse-Fehler")
-                    # Vielleicht ist es HTML?
-                    if 'html' in response.headers.get('content-type', '').lower():
-                        debug_info.append("HTML-Antwort erhalten, versuche zu parsen...")
-                        return parse_html_data(response.text), debug_info
-        except Exception as e:
-            debug_info.append(f"✗ Fehler: {str(e)}")
-    
-    # Methode 2: HTML Scraping als Fallback
+def fetch_trackleaders_data():
+    """Versucht Daten von TrackLeaders zu holen"""
     try:
-        debug_info.append("\nVersuche HTML Scraping...")
-        response = requests.get("https://trackleaders.com/raam25", 
-                              timeout=10,
-                              headers={'User-Agent': 'Mozilla/5.0'})
-        if response.status_code == 200:
-            return parse_html_data(response.text), debug_info
-    except Exception as e:
-        debug_info.append(f"✗ HTML Scraping Fehler: {str(e)}")
-    
-    return None, debug_info
-
-def parse_html_data(html_content):
-    """Parst HTML-Seite nach Tracking-Daten"""
-    try:
-        soup = BeautifulSoup(html_content, 'html.parser')
+        # Versuche die Hauptseite zu laden
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
         
-        # Suche nach JavaScript-Variablen mit Tracking-Daten
-        scripts = soup.find_all('script')
-        for script in scripts:
-            text = str(script.string) if script.string else ''
-            
-            # Suche nach typischen Variablennamen
-            import re
-            patterns = [
-                r'var\s+racers\s*=\s*(\[.*?\]);',
-                r'var\s+trackData\s*=\s*(\{.*?\});',
-                r'raceData\s*=\s*(\[.*?\]);'
-            ]
-            
-            for pattern in patterns:
-                match = re.search(pattern, text, re.DOTALL)
-                if match:
-                    try:
-                        # Versuche JSON zu parsen
-                        data = json.loads(match.group(1))
-                        return data
-                    except:
-                        continue
+        # Versuche verschiedene URLs
+        urls = [
+            'https://trackleaders.com/raam25',
+            'https://trackleaders.com/raam25f.php'
+        ]
         
-        # Alternative: Suche nach Tabellendaten
-        # (implementiere hier weitere Parsing-Logik wenn nötig)
-        
-    except Exception as e:
-        st.error(f"HTML Parsing Fehler: {str(e)}")
-    
-    return None
-
-def process_live_data(conn, data):
-    """Verarbeitet die Live-Daten und aktualisiert die Datenbank"""
-    if not data:
-        return
-    
-    cursor = conn.cursor()
-    
-    # Alle vorherigen Daten löschen
-    cursor.execute("DELETE FROM positions")
-    cursor.execute("DELETE FROM racers")
-    
-    # Prüfe ob data eine Liste oder Dict ist
-    if isinstance(data, dict):
-        # Möglicherweise sind die Daten in einem Unterobjekt
-        if 'racers' in data:
-            data = data['racers']
-        elif 'data' in data:
-            data = data['data']
-    
-    if not isinstance(data, list):
-        st.warning("Unerwartetes Datenformat")
-        return
-    
-    # Neue Daten einfügen
-    for racer in data:
-        if isinstance(racer, dict):
-            name = str(racer.get('name', ''))
-            bib = str(racer.get('bib', racer.get('number', '')))
-            category = str(racer.get('category', racer.get('class', 'SOLO')))
-            
-            # Nur Solo-Fahrer
-            if 'solo' not in category.lower():
+        for url in urls:
+            try:
+                response = requests.get(url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    # Versuche JavaScript-Daten zu extrahieren
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    # Suche nach JavaScript mit Tracking-Daten
+                    scripts = soup.find_all('script')
+                    for script in scripts:
+                        if script.string:
+                            # Suche nach Variablen die Tracking-Daten enthalten könnten
+                            patterns = [
+                                r'var\s+racers\s*=\s*(\[.*?\]);',
+                                r'trackData\s*=\s*(\{.*?\});',
+                                r'raceData\s*:\s*(\[.*?\])',
+                            ]
+                            
+                            for pattern in patterns:
+                                match = re.search(pattern, script.string, re.DOTALL)
+                                if match:
+                                    try:
+                                        data = json.loads(match.group(1))
+                                        return process_scraped_data(data)
+                                    except:
+                                        continue
+            except:
                 continue
-            
-            # Fritz Geers identifizieren (verschiedene Schreibweisen)
-            is_fritz = 0
-            if any(x in name.lower() for x in ['fritz', 'geers', 'gers']):
-                is_fritz = 1
-                st.sidebar.success(f"Fritz gefunden: {name}")
-            
-            # Fahrer einfügen
-            cursor.execute('''
-                INSERT OR REPLACE INTO racers (bib_number, name, category, country, is_fritz_geers)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (bib, name, category, racer.get('country', ''), is_fritz))
-            
-            # Position einfügen
-            cursor.execute('''
-                INSERT INTO positions (
-                    timestamp, bib_number, latitude, longitude, distance_miles,
-                    speed_mph, elevation_ft, checkpoint, rank, time_behind_leader
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                datetime.now(),
-                bib,
-                float(racer.get('lat', racer.get('latitude', 0))) if racer.get('lat') or racer.get('latitude') else None,
-                float(racer.get('lon', racer.get('lng', racer.get('longitude', 0)))) if racer.get('lon') or racer.get('lng') or racer.get('longitude') else None,
-                float(racer.get('distance', racer.get('miles', 0))) if racer.get('distance') or racer.get('miles') else 0,
-                float(racer.get('speed', racer.get('mph', 0))) if racer.get('speed') or racer.get('mph') else 0,
-                int(racer.get('elevation', racer.get('alt', 0))) if racer.get('elevation') or racer.get('alt') else 0,
-                str(racer.get('checkpoint', racer.get('location', ''))),
-                int(racer.get('position', racer.get('rank', racer.get('place', 999)))) if racer.get('position') or racer.get('rank') or racer.get('place') else 999,
-                str(racer.get('behind', racer.get('gap', '')))
-            ))
+        
+        # Wenn nichts funktioniert, nutze Demo-Daten
+        st.warning("Live-Daten momentan nicht verfügbar. Zeige Demo-Daten.")
+        return DEMO_DATA
+        
+    except Exception as e:
+        st.error(f"Fehler beim Datenabruf: {str(e)}")
+        return DEMO_DATA
+
+def process_scraped_data(data):
+    """Verarbeitet gescrapte Daten in einheitliches Format"""
+    processed = []
     
-    conn.commit()
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                processed.append({
+                    'name': item.get('name', ''),
+                    'bib': str(item.get('bib', item.get('number', ''))),
+                    'category': item.get('category', item.get('class', 'SOLO')),
+                    'position': int(item.get('position', item.get('rank', 999))),
+                    'distance': float(item.get('distance', item.get('miles', 0))),
+                    'speed': float(item.get('speed', item.get('mph', 0))),
+                    'location': item.get('location', item.get('checkpoint', '')),
+                    'lat': float(item.get('lat', item.get('latitude', 0))),
+                    'lon': float(item.get('lon', item.get('longitude', 0)))
+                })
+    
+    return processed if processed else DEMO_DATA
 
-def get_current_standings(conn):
-    """Holt aktuelle Rangliste"""
-    query = """
-    SELECT 
-        r.name,
-        r.bib_number,
-        r.country,
-        r.is_fritz_geers,
-        p.rank,
-        p.distance_miles,
-        p.speed_mph,
-        p.elevation_ft,
-        p.checkpoint,
-        p.time_behind_leader,
-        p.latitude,
-        p.longitude,
-        p.timestamp
-    FROM racers r
-    JOIN positions p ON r.bib_number = p.bib_number
-    ORDER BY p.rank
-    """
-    return pd.read_sql_query(query, conn)
+def create_dataframe(data):
+    """Erstellt DataFrame aus den Daten"""
+    df = pd.DataFrame(data)
+    
+    # Fritz Geers identifizieren
+    df['is_fritz'] = df['name'].str.lower().str.contains('fritz|geers', na=False)
+    
+    # Nur Solo-Fahrer
+    df = df[df['category'].str.upper() == 'SOLO']
+    
+    # Sortieren nach Position
+    df = df.sort_values('position')
+    
+    return df
 
-# Hauptanwendung
 def main():
-    # Datenbank initialisieren
-    conn = init_connection()
-    create_tables(conn)
-    
     # Sidebar
     st.sidebar.title("🚴 RAAM 2025 Live Tracker")
     st.sidebar.markdown("---")
-    
-    # Debug-Modus
-    debug_mode = st.sidebar.checkbox("🔧 Debug-Modus", value=False)
     
     # Refresh Button
     if st.sidebar.button("🔄 Daten aktualisieren"):
         st.cache_data.clear()
         st.rerun()
     
+    # Info
+    st.sidebar.markdown("---")
+    st.sidebar.info(
+        "**Fritz Geers** wird mit ⭐ hervorgehoben.\n\n"
+        "Daten werden alle 5 Minuten aktualisiert."
+    )
+    
     # Hauptbereich
     st.title("🏆 Race Across America 2025 - Live Tracking")
+    st.markdown(f"*Stand: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}*")
     
-    # Live-Daten abrufen
-    with st.spinner("Lade Live-Daten..."):
-        live_data, debug_info = fetch_live_data()
+    # Daten laden
+    with st.spinner("Lade Daten..."):
+        data = fetch_trackleaders_data()
+        df = create_dataframe(data)
     
-    # Debug-Informationen anzeigen
-    if debug_mode:
-        with st.expander("🔧 Debug-Informationen"):
-            for info in debug_info:
-                st.text(info)
+    if df.empty:
+        st.error("Keine Daten verfügbar")
+        return
+    
+    # Fritz Geers Status
+    fritz_data = df[df['is_fritz']]
+    if not fritz_data.empty:
+        fritz = fritz_data.iloc[0]
+        
+        st.markdown("### ⭐ Fritz Geers Status")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            st.metric("Position", f"#{fritz['position']}")
+        with col2:
+            st.metric("Distanz", f"{fritz['distance']:.1f} mi")
+        with col3:
+            st.metric("Geschwindigkeit", f"{fritz['speed']:.1f} mph")
+        with col4:
+            st.metric("Standort", fritz['location'])
+        with col5:
+            # Rückstand berechnen
+            leader = df.iloc[0]
+            gap = leader['distance'] - fritz['distance']
+            st.metric("Rückstand", f"{gap:.1f} mi" if gap > 0 else "Führend!")
+    
+    st.markdown("---")
+    
+    # Tabs
+    tab1, tab2, tab3 = st.tabs(["📊 Rangliste", "🗺️ Karte", "📈 Statistiken"])
+    
+    with tab1:
+        st.subheader("Aktuelle Rangliste - Solo Kategorie")
+        
+        # Rangliste vorbereiten
+        display_df = df[['position', 'name', 'distance', 'speed', 'location', 'is_fritz']].copy()
+        display_df.columns = ['Pos', 'Name', 'Distanz (mi)', 'Geschw. (mph)', 'Standort', 'is_fritz']
+        
+        # Fritz gelb markieren
+        def highlight_fritz(row):
+            if row['is_fritz']:
+                return ['background-color: #ffd700'] * len(row)
+            return [''] * len(row)
+        
+        styled_df = display_df.drop('is_fritz', axis=1).style.apply(highlight_fritz, axis=1)
+        st.dataframe(styled_df, use_container_width=True, height=600)
+    
+    with tab2:
+        st.subheader("Live Positionen")
+        
+        # Karte erstellen
+        if 'lat' in df.columns and 'lon' in df.columns:
+            # Zentrum berechnen
+            center_lat = df['lat'].mean()
+            center_lon = df['lon'].mean()
             
-            if live_data:
-                st.success("Daten erfolgreich geladen!")
-                st.json(live_data[:3] if isinstance(live_data, list) else live_data)  # Erste 3 Einträge
-            else:
-                st.error("Keine Daten erhalten")
-    
-    if live_data:
-        # Daten verarbeiten
-        process_live_data(conn, live_data)
-        
-        # Daten laden
-        standings_df = get_current_standings(conn)
-        
-        if standings_df.empty:
-            st.warning("Keine Solo-Fahrer in den Daten gefunden.")
-            st.info("Aktivieren Sie den Debug-Modus in der Sidebar, um die Rohdaten zu sehen.")
+            m = folium.Map(location=[center_lat, center_lon], zoom_start=6)
+            
+            # RAAM Route (vereinfacht)
+            route_points = [
+                [33.0198, -117.0864],  # Oceanside, CA (Start)
+                [33.4484, -112.0740],  # Phoenix, AZ
+                [35.0844, -106.6504],  # Albuquerque, NM
+                [35.4676, -97.5164],   # Oklahoma City, OK
+                [38.6270, -90.1994],   # St. Louis, MO
+                [39.7392, -84.1916],   # Dayton, OH
+                [39.9526, -75.1652]    # Philadelphia, PA (Ziel)
+            ]
+            
+            folium.PolyLine(route_points, color="blue", weight=3, opacity=0.6).add_to(m)
+            
+            # Fahrer-Positionen
+            for _, racer in df.iterrows():
+                if racer['lat'] != 0 and racer['lon'] != 0:
+                    color = 'gold' if racer['is_fritz'] else 'red'
+                    icon = 'star' if racer['is_fritz'] else 'bicycle'
+                    
+                    folium.Marker(
+                        [racer['lat'], racer['lon']],
+                        popup=f"""
+                        <b>{racer['name']}</b><br>
+                        Position: #{racer['position']}<br>
+                        Distanz: {racer['distance']:.1f} mi<br>
+                        Geschw.: {racer['speed']:.1f} mph
+                        """,
+                        tooltip=racer['name'],
+                        icon=folium.Icon(color=color, icon=icon)
+                    ).add_to(m)
+            
+            st_folium(m, height=600)
         else:
-            st.success(f"✓ {len(standings_df)} Solo-Fahrer gefunden")
-            
-            # Fritz Geers Status
-            fritz_data = standings_df[standings_df['is_fritz_geers'] == 1]
-            if not fritz_data.empty:
-                fritz = fritz_data.iloc[0]
-                
-                st.markdown("### ⭐ Fritz Geers Status")
-                col1, col2, col3, col4, col5 = st.columns(5)
-                
-                with col1:
-                    st.metric("Position", f"#{int(fritz['rank'])}" if fritz['rank'] < 999 else "N/A")
-                with col2:
-                    st.metric("Distanz", f"{fritz['distance_miles']:.1f} mi")
-                with col3:
-                    st.metric("Geschwindigkeit", f"{fritz['speed_mph']:.1f} mph")
-                with col4:
-                    st.metric("Höhe", f"{fritz['elevation_ft']:,} ft" if fritz['elevation_ft'] else "N/A")
-                with col5:
-                    st.metric("Rückstand", fritz['time_behind_leader'] or "N/A")
-            else:
-                st.warning("⚠️ Fritz Geers nicht gefunden. Prüfen Sie die Fahrerliste unten.")
-            
-            # Tabs
-            tab1, tab2 = st.tabs(["📊 Rangliste", "🗺️ Karte"])
-            
-            with tab1:
-                st.subheader("📊 Aktuelle Rangliste - Solo Kategorie")
-                
-                # Alle Fahrer anzeigen
-                display_df = standings_df[[
-                    'rank', 'name', 'bib_number', 'distance_miles', 'speed_mph', 
-                    'checkpoint', 'is_fritz_geers'
-                ]].copy()
-                
-                display_df['rank'] = display_df['rank'].apply(lambda x: x if x < 999 else 'N/A')
-                
-                display_df.columns = [
-                    'Pos', 'Name', 'Nr.', 'Distanz (mi)', 'Geschw. (mph)', 
-                    'Checkpoint', 'is_fritz'
-                ]
-                
-                # Fritz gelb markieren
-                def highlight_fritz(row):
-                    if row['is_fritz'] == 1:
-                        return ['background-color: #ffd700'] * len(row)
-                    return [''] * len(row)
-                
-                styled_df = display_df.drop('is_fritz', axis=1).style.apply(highlight_fritz, axis=1)
-                st.dataframe(styled_df, use_container_width=True, height=600)
-            
-            with tab2:
-                st.subheader("🗺️ Live Positionen")
-                
-                # Nur Fahrer mit gültigen Koordinaten
-                map_df = standings_df[
-                    (standings_df['latitude'].notna()) & 
-                    (standings_df['longitude'].notna()) &
-                    (standings_df['latitude'] != 0)
-                ]
-                
-                if not map_df.empty:
-                    m = folium.Map(location=[39.0, -98.0], zoom_start=4)
-                    
-                    for _, racer in map_df.iterrows():
-                        color = 'gold' if racer['is_fritz_geers'] else 'blue'
-                        icon = 'star' if racer['is_fritz_geers'] else 'bicycle'
-                        
-                        folium.Marker(
-                            [racer['latitude'], racer['longitude']],
-                            popup=f"{racer['name']} - #{racer['rank']}",
-                            icon=folium.Icon(color=color, icon=icon)
-                        ).add_to(m)
-                    
-                    st_folium(m, height=500)
-                else:
-                    st.info("Keine GPS-Koordinaten verfügbar")
-    else:
-        st.error("❌ Keine Live-Daten verfügbar")
-        st.info("""
-        **Mögliche Gründe:**
-        - Die TrackLeaders API ist temporär nicht erreichbar
-        - Das Rennen hat noch nicht begonnen
-        - Die URL hat sich geändert
+            st.info("Keine GPS-Daten verfügbar")
+    
+    with tab3:
+        st.subheader("Leistungsstatistiken")
         
-        Aktivieren Sie den Debug-Modus in der Sidebar für mehr Informationen.
-        """)
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Geschwindigkeitsvergleich
+            fig_speed = px.bar(
+                df.head(10),
+                x='name',
+                y='speed',
+                title='Top 10 - Aktuelle Geschwindigkeiten',
+                labels={'speed': 'Geschwindigkeit (mph)', 'name': 'Fahrer'},
+                color='is_fritz',
+                color_discrete_map={False: 'lightblue', True: 'gold'}
+            )
+            fig_speed.update_layout(showlegend=False)
+            fig_speed.update_xaxes(tickangle=45)
+            st.plotly_chart(fig_speed, use_container_width=True)
+        
+        with col2:
+            # Distanz-Vergleich  
+            fig_dist = px.bar(
+                df.head(10),
+                x='distance',
+                y='name',
+                orientation='h',
+                title='Top 10 - Zurückgelegte Distanz',
+                labels={'distance': 'Distanz (Meilen)', 'name': 'Fahrer'},
+                color='is_fritz',
+                color_discrete_map={False: 'lightblue', True: 'gold'}
+            )
+            fig_dist.update_layout(showlegend=False)
+            st.plotly_chart(fig_dist, use_container_width=True)
+        
+        # Zusammenfassung
+        st.markdown("### 📊 Zusammenfassung")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Teilnehmer", len(df))
+        with col2:
+            st.metric("Führender", df.iloc[0]['name'])
+        with col3:
+            st.metric("Ø Geschwindigkeit", f"{df['speed'].mean():.1f} mph")
+        with col4:
+            st.metric("Max. Distanz", f"{df['distance'].max():.1f} mi")
 
 if __name__ == "__main__":
     main()
