@@ -1,6 +1,6 @@
 """
-RAAM 2025 Live Dashboard - Version 3
-Nutzt den direkten JSON/API-Abruf für maximale Stabilität.
+RAAM 2025 Live Dashboard - Version 4
+Nutzt einen zweistufigen Abruf für maximale Stabilität und enthält Debug-Ausgaben.
 """
 
 import streamlit as st
@@ -10,6 +10,7 @@ import folium
 from streamlit_folium import st_folium
 from datetime import datetime
 import requests
+import re
 import json
 
 # Seiten-Konfiguration
@@ -38,42 +39,84 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- NEUE DATENABRUF-FUNKTIONEN (API-VERSION) ---
+# --- NEUE, ZWEISTUFIGE DATENABRUF-FUNKTIONEN ---
 
-@st.cache_data(ttl=45)  # Kürzerer Cache, da der Abruf schneller und stabiler ist
+@st.cache_data(ttl=60)
 def fetch_trackleaders_data():
     """
-    Holt Live-Daten direkt von der RAAM 2025 JSON-Datenquelle.
-    Diese Methode ist stabiler als HTML-Scraping.
+    Holt Live-Daten in einem robusten, zweistufigen Prozess:
+    1. Finde die URL zur JSON-Datei auf der Haupt-Tracking-Seite.
+    2. Rufe die gefundene JSON-URL direkt ab.
     """
-    # Dies ist die direkte URL zur JSON-Datei, die die Webseite selbst verwendet.
-    json_data_url = "https://trackleaders.com/spot/raam25/full.json"
+    base_url = "https://trackleaders.com"
+    # Die Seite, die den Link zur eigentlichen Datenquelle enthält
+    tracker_page_url = f"{base_url}/raam25f.php"
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        'Referer': 'https://trackleaders.com/raam25f.php',
-        'Accept': 'application/json, text/javascript, */*; q=0.01'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': tracker_page_url
     }
-    
+
     try:
-        response = requests.get(json_data_url, headers=headers, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
+        # --- SCHRITT 1: Finde die URL der JSON-Datei ---
+        st.write(f"Schritt 1: Suche nach JSON-URL auf: `{tracker_page_url}`")
+        page_response = requests.get(tracker_page_url, headers=headers, timeout=15)
+        
+        if page_response.status_code != 200:
+            st.error(f"Fehler bei Schritt 1: Haupt-Tracker-Seite nicht erreichbar. Status: {page_response.status_code}")
+            return None
+
+        # Suche nach einem Muster, das auf die JSON-Datei verweist.
+        # Wir versuchen mehrere gängige Muster.
+        patterns = [
+            r'"(spot/raam25/full\.json)"',    # Exaktes Muster vom Vorjahr (Punkt maskiert)
+            r'"(raam25-all\.json)"',          # Anderes gängiges Muster
+            r'src\s*=\s*"([^"]+\.json)"'      # Generisches Muster für jede .json Datei
+        ]
+        
+        json_url_path = None
+        for pattern in patterns:
+            match = re.search(pattern, page_response.text)
+            if match:
+                json_url_path = match.group(1)
+                st.write(f"Erfolg! JSON-Pfad gefunden: **{json_url_path}**")
+                break
+        
+        if not json_url_path:
+            st.error("Fehler bei Schritt 1: Konnte den Pfad zur JSON-Datei im HTML nicht finden. Die Seitenstruktur hat sich geändert.")
+            # Gib einen Teil des HTMLs aus, um bei der Fehlersuche zu helfen
+            st.code(page_response.text[:2000])
+            return None
+
+        full_json_url = f"{base_url}/{json_url_path}"
+
+        # --- SCHRITT 2: Rufe die gefundene JSON-URL ab ---
+        st.write(f"Schritt 2: Rufe Daten von **{full_json_url}** ab...")
+        data_response = requests.get(full_json_url, headers=headers, timeout=15)
+        
+        if data_response.status_code == 200:
+            data = data_response.json()
             if data and 'features' in data:
+                st.success("Daten erfolgreich abgerufen und verarbeitet!")
+                # Debug-Ausgaben können entfernt werden, sobald es stabil läuft.
+                # Um sie zu entfernen, einfach die Zeilen mit st.write/st.success/st.error löschen.
                 return parse_geojson_data(data['features'])
             else:
-                st.error("JSON-Datenquelle ist leer oder hat ein unerwartetes Format.")
+                st.error("Fehler bei Schritt 2: JSON-Daten sind leer oder im falschen Format.")
                 return None
         else:
-            st.error(f"Fehler beim Abrufen der Datenquelle. Status Code: {response.status_code}")
+            st.error(f"Fehler bei Schritt 2: Konnte die JSON-Datei nicht abrufen. Status: {data_response.status_code}")
             return None
+
     except requests.exceptions.RequestException as e:
-        st.error(f"Netzwerkfehler beim Abrufen der JSON-Daten: {e}")
+        st.error(f"Ein Netzwerkfehler ist aufgetreten: {e}")
         return None
     except json.JSONDecodeError:
-        st.error("Fehler beim Verarbeiten der JSON-Antwort. Die Daten sind möglicherweise fehlerhaft.")
+        st.error("Fehler beim Verarbeiten der JSON-Antwort. Inhalt war kein valides JSON.")
         return None
+    
     return None
+
 
 def parse_geojson_data(features):
     """Konvertiert TrackLeaders GeoJSON-Daten in ein einheitliches Format."""
@@ -139,7 +182,7 @@ def main():
         st.cache_data.clear()
         st.rerun()
     
-    auto_refresh = st.sidebar.checkbox("Auto-Refresh (45 Sek)", value=True)
+    auto_refresh = st.sidebar.checkbox("Auto-Refresh (60 Sek)", value=True)
     
     st.sidebar.markdown("---")
     st.sidebar.info(
@@ -149,8 +192,8 @@ def main():
     
     st.title("🏆 Race Across America 2025 - Live Tracking")
     
-    with st.spinner("Lade Live-Daten von TrackLeaders..."):
-        racers_data = fetch_trackleaders_data()
+    # HINWEIS: Die Debug-Ausgaben aus fetch_trackleaders_data() werden hier angezeigt.
+    racers_data = fetch_trackleaders_data()
     
     if racers_data:
         df = create_dataframe(racers_data)
@@ -267,8 +310,8 @@ def main():
                 st.download_button("📥 Download JSON", json_str, f"raam_raw_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", "application/json")
     
     if auto_refresh:
-        st.markdown('<meta http-equiv="refresh" content="45">', unsafe_allow_html=True)
-        st.sidebar.info("🔄 Nächstes Update in 45 Sekunden...")
+        st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
+        st.sidebar.info("🔄 Nächstes Update in 60 Sekunden...")
 
 if __name__ == "__main__":
     main()
