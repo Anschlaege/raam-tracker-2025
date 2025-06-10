@@ -84,8 +84,7 @@ def fetch_trackleaders_data():
     """Holt Daten von TrackLeaders"""
     # Für 2025 anpassen
     endpoints = [
-        "https://trackleaders.com/raam24f.php?format=json",  # Testdaten von 2024
-        # "https://trackleaders.com/raam25f.php?format=json",  # Für 2025
+        "https://trackleaders.com/raam25f.php?format=json",  # Für 2025
     ]
     
     for endpoint in endpoints:
