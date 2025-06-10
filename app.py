@@ -1,6 +1,6 @@
 """
-RAAM 2025 Live Dashboard - Version 10 (Stabile Darstellung)
-- Entfernt die problematische .hide()-Funktion, um Kompatibilität zu gewährleisten.
+RAAM 2025 Live Dashboard - Version 11 (Feature-Update)
+- Fügt eine neue Spalte mit dem detaillierten Abstand zu Fritz Geers hinzu.
 """
 
 import streamlit as st
@@ -55,8 +55,6 @@ def fetch_trackleaders_data():
         
         return parse_js_code_data(matches)
 
-    except requests.exceptions.RequestException as e:
-        st.error(f"Netzwerkfehler: {e}")
     except Exception as e:
         st.error(f"Ein unerwarteter Fehler im Datenabruf ist aufgetreten: {e}")
     return None
@@ -91,11 +89,42 @@ def create_dataframe(racers_data):
     return df
 
 def calculate_statistics(df):
-    """Berechnet zusätzliche Statistiken."""
+    """Berechnet den Abstand zum Führenden und den detaillierten Abstand zu Fritz."""
     if df.empty: return df
+
+    # 1. Abstand zum Führenden (wie bisher)
     leader = df.iloc[0]
-    df['gap_miles'] = leader['distance'] - df['distance']
-    df['gap_miles'] = df['gap_miles'].apply(lambda x: f"+{x:.1f}" if x > 0 else "Leader")
+    df['gap_to_leader'] = leader['distance'] - df['distance']
+    df['gap_to_leader'] = df['gap_to_leader'].apply(lambda x: f"+{x:.1f} mi" if x > 0 else "Leader")
+
+    # 2. Detaillierter Abstand zu Fritz
+    fritz_data_list = df[df['is_fritz']].to_dict('records')
+    if not fritz_data_list:
+        df['gap_to_fritz'] = ""
+        return df
+
+    fritz = fritz_data_list[0]
+    fritz_dist = fritz['distance']
+    fritz_speed = fritz['speed']
+
+    def format_time_gap(hours):
+        if pd.isna(hours) or hours <= 0: return ""
+        h = int(hours)
+        m = int((hours * 60) % 60)
+        if h > 0: return f"~{h}h {m}m"
+        else: return f"~{m}m"
+
+    def calculate_gap_to_fritz(row):
+        if row['is_fritz']: return "Fritz Geers"
+        if row['distance'] > fritz_dist:
+            gap_miles = row['distance'] - fritz_dist
+            gap_km = gap_miles * 1.60934
+            time_gap_hours = (gap_miles / fritz_speed) if fritz_speed > 0 else None
+            time_str = format_time_gap(time_gap_hours)
+            return f"+{gap_miles:.1f} mi / {gap_km:.1f} km ({time_str})"
+        return ""
+
+    df['gap_to_fritz'] = df.apply(calculate_gap_to_fritz, axis=1)
     return df
 
 # Hauptanwendung
@@ -116,7 +145,7 @@ def main():
     if racers_data:
         st.success(f"{len(racers_data)} Fahrer erfolgreich aus Live-Daten extrahiert!")
         df = create_dataframe(racers_data)
-        df = calculate_statistics(df)
+        df = calculate_statistics(df) # Hier werden die neuen Abstände berechnet
         st.markdown(f"*Aktualisiert: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}*")
         
         if not df.empty:
@@ -129,7 +158,7 @@ def main():
                 cols[1].metric("Distanz", f"{fritz['distance']:.1f} mi")
                 cols[2].metric("Geschwindigkeit", f"{fritz['speed']:.1f} mph")
                 cols[3].metric("Startnummer", f"#{fritz['bib']}")
-                cols[4].metric("Rückstand", fritz.get('gap_miles', 'N/A'))
+                cols[4].metric("Rückstand (Führender)", fritz.get('gap_to_leader', 'N/A'))
             else:
                 st.warning("⚠️ Fritz Geers (#675) wurde in den Live-Daten nicht gefunden.")
             
@@ -138,22 +167,25 @@ def main():
             
             with tab1:
                 st.subheader("Live Rangliste - Solo Kategorie")
-                display_cols = ['position', 'bib', 'name', 'distance', 'speed', 'gap_miles', 'is_fritz']
+                # NEUE SPALTE HINZUGEFÜGT
+                display_cols = ['position', 'bib', 'name', 'distance', 'speed', 'gap_to_fritz', 'is_fritz']
                 display_df = df[display_cols].copy()
                 display_df.rename(columns={
                     'position': 'Pos', 'bib': 'Nr.', 'name': 'Name', 
-                    'distance': 'Distanz (mi)', 'speed': 'Geschw. (mph)', 'gap_miles': 'Rückstand'
+                    'distance': 'Distanz (mi)', 'speed': 'Geschw. (mph)', 
+                    'gap_to_fritz': 'Abstand zu Fritz' # NEUER SPALTENNAME
                 }, inplace=True)
                 
                 def highlight_fritz(row):
                     return ['background-color: #ffd700'] * len(row) if row.is_fritz else [''] * len(row)
                 
-                # --- KORREKTUR HIER: .hide() entfernt ---
                 styled_df = display_df.style.apply(highlight_fritz, axis=1)
-                
-                st.dataframe(styled_df, use_container_width=True, height=600)
+                # Die is_fritz Spalte wird jetzt nicht mehr angezeigt, da sie nicht im `rename` mapping ist
+                # und wir sie hier explizit verstecken.
+                st.dataframe(styled_df.hide(columns=['is_fritz']), use_container_width=True, height=800)
 
             with tab2:
+                # Karten-Code bleibt gleich
                 st.subheader("Live Positionen auf der Karte")
                 map_df = df[(df['lat'] != 0) & (df['lon'] != 0)]
                 if not map_df.empty:
@@ -169,12 +201,12 @@ def main():
 
             with tab3:
                 st.subheader("Live Statistiken")
-                top10 = df.head(10)
+                top10 = df.head(10).sort_values('distance', ascending=True)
                 fig_dist = px.bar(top10, y='name', x='distance', orientation='h', title='Top 10 - Distanz')
                 st.plotly_chart(fig_dist, use_container_width=True)
 
     else:
-        st.warning("Es konnten keine verarbeitbaren Daten gefunden werden. Warten auf das nächste Update...")
+        st.warning("Es konnten keine verarbeitbaren Daten gefunden werden.")
 
     if auto_refresh:
         st.markdown('<meta http-equiv="refresh" content="45">', unsafe_allow_html=True)
