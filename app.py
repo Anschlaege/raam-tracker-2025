@@ -1,7 +1,6 @@
 """
-RAAM 2025 Live Dashboard - Version 9 (Fehlerbehebung Darstellung)
-- KeyError in der Tabellen-Formatierung behoben.
-- Identifizierung von Fritz Geers über Startnummer #675 verbessert.
+RAAM 2025 Live Dashboard - Version 10 (Stabile Darstellung)
+- Entfernt die problematische .hide()-Funktion, um Kompatibilität zu gewährleisten.
 """
 
 import streamlit as st
@@ -51,7 +50,7 @@ def fetch_trackleaders_data():
         matches = pattern.findall(js_content)
 
         if not matches:
-            st.error("Konnte keine Fahrer-Daten im JavaScript finden.")
+            st.error("Konnte keine Fahrer-Daten mit dem Regex-Muster im JavaScript finden.")
             return None
         
         return parse_js_code_data(matches)
@@ -59,7 +58,7 @@ def fetch_trackleaders_data():
     except requests.exceptions.RequestException as e:
         st.error(f"Netzwerkfehler: {e}")
     except Exception as e:
-        st.error(f"Ein unerwarteter Fehler ist aufgetreten: {e}")
+        st.error(f"Ein unerwarteter Fehler im Datenabruf ist aufgetreten: {e}")
     return None
 
 def parse_js_code_data(matches):
@@ -86,11 +85,7 @@ def create_dataframe(racers_data):
     """Erstellt DataFrame und identifiziert Fritz Geers via Startnummer #675."""
     if not racers_data: return pd.DataFrame()
     df = pd.DataFrame(racers_data)
-    
-    # Verbesserte Identifizierung: Primär nach Startnummer, sekundär nach Name
-    df['is_fritz'] = (df['bib'] == '675') | \
-                     (df['name'].str.lower().str.contains('fritz|geers|gers', na=False, regex=True))
-    
+    df['is_fritz'] = (df['bib'] == '675') | (df['name'].str.lower().str.contains('fritz|geers|gers', na=False, regex=True))
     df = df.sort_values('position')
     df['data_timestamp'] = datetime.now()
     return df
@@ -150,22 +145,36 @@ def main():
                     'distance': 'Distanz (mi)', 'speed': 'Geschw. (mph)', 'gap_miles': 'Rückstand'
                 }, inplace=True)
                 
-                # KORRIGIERTE STYLING-LOGIK
                 def highlight_fritz(row):
                     return ['background-color: #ffd700'] * len(row) if row.is_fritz else [''] * len(row)
                 
-                styled_df = display_df.style.apply(highlight_fritz, axis=1).hide(columns=['is_fritz'])
+                # --- KORREKTUR HIER: .hide() entfernt ---
+                styled_df = display_df.style.apply(highlight_fritz, axis=1)
+                
                 st.dataframe(styled_df, use_container_width=True, height=600)
 
             with tab2:
-                # ... (Karten-Code bleibt gleich)
-                pass
+                st.subheader("Live Positionen auf der Karte")
+                map_df = df[(df['lat'] != 0) & (df['lon'] != 0)]
+                if not map_df.empty:
+                    m = folium.Map(location=[map_df['lat'].mean(), map_df['lon'].mean()], zoom_start=5)
+                    for _, racer in map_df.iterrows():
+                        color = 'gold' if racer['is_fritz'] else 'blue'
+                        icon = 'star' if racer['is_fritz'] else 'bicycle'
+                        popup_html = f"<b>{racer['name']}</b><br>Pos: #{racer['position']}<br>Dist: {racer['distance']:.1f} mi"
+                        folium.Marker([racer['lat'], racer['lon']], popup=folium.Popup(popup_html, max_width=300),
+                                      tooltip=f"{racer['name']} (#{racer['position']})",
+                                      icon=folium.Icon(color=color, prefix='fa', icon=icon)).add_to(m)
+                    st_folium(m, height=600, width=None)
 
             with tab3:
-                # ... (Statistik-Code bleibt gleich)
-                pass
+                st.subheader("Live Statistiken")
+                top10 = df.head(10)
+                fig_dist = px.bar(top10, y='name', x='distance', orientation='h', title='Top 10 - Distanz')
+                st.plotly_chart(fig_dist, use_container_width=True)
+
     else:
-        st.warning("Es konnten keine verarbeitbaren Daten gefunden werden.")
+        st.warning("Es konnten keine verarbeitbaren Daten gefunden werden. Warten auf das nächste Update...")
 
     if auto_refresh:
         st.markdown('<meta http-equiv="refresh" content="45">', unsafe_allow_html=True)
