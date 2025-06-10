@@ -1,6 +1,6 @@
 """
-RAAM 2025 Live Dashboard - Version 11 (Feature-Update)
-- Fügt eine neue Spalte mit dem detaillierten Abstand zu Fritz Geers hinzu.
+RAAM 2025 Live Dashboard - Version 12 (Finale, stabile Darstellung)
+- Die problematische .hide()-Funktion wurde endgültig entfernt.
 """
 
 import streamlit as st
@@ -92,12 +92,10 @@ def calculate_statistics(df):
     """Berechnet den Abstand zum Führenden und den detaillierten Abstand zu Fritz."""
     if df.empty: return df
 
-    # 1. Abstand zum Führenden (wie bisher)
     leader = df.iloc[0]
     df['gap_to_leader'] = leader['distance'] - df['distance']
     df['gap_to_leader'] = df['gap_to_leader'].apply(lambda x: f"+{x:.1f} mi" if x > 0 else "Leader")
 
-    # 2. Detaillierter Abstand zu Fritz
     fritz_data_list = df[df['is_fritz']].to_dict('records')
     if not fritz_data_list:
         df['gap_to_fritz'] = ""
@@ -145,7 +143,7 @@ def main():
     if racers_data:
         st.success(f"{len(racers_data)} Fahrer erfolgreich aus Live-Daten extrahiert!")
         df = create_dataframe(racers_data)
-        df = calculate_statistics(df) # Hier werden die neuen Abstände berechnet
+        df = calculate_statistics(df)
         st.markdown(f"*Aktualisiert: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}*")
         
         if not df.empty:
@@ -167,25 +165,23 @@ def main():
             
             with tab1:
                 st.subheader("Live Rangliste - Solo Kategorie")
-                # NEUE SPALTE HINZUGEFÜGT
                 display_cols = ['position', 'bib', 'name', 'distance', 'speed', 'gap_to_fritz', 'is_fritz']
                 display_df = df[display_cols].copy()
                 display_df.rename(columns={
                     'position': 'Pos', 'bib': 'Nr.', 'name': 'Name', 
                     'distance': 'Distanz (mi)', 'speed': 'Geschw. (mph)', 
-                    'gap_to_fritz': 'Abstand zu Fritz' # NEUER SPALTENNAME
+                    'gap_to_fritz': 'Abstand zu Fritz'
                 }, inplace=True)
                 
                 def highlight_fritz(row):
                     return ['background-color: #ffd700'] * len(row) if row.is_fritz else [''] * len(row)
                 
+                # --- KORREKTUR HIER: .hide() endgültig entfernt ---
                 styled_df = display_df.style.apply(highlight_fritz, axis=1)
-                # Die is_fritz Spalte wird jetzt nicht mehr angezeigt, da sie nicht im `rename` mapping ist
-                # und wir sie hier explizit verstecken.
-                st.dataframe(styled_df.hide(columns=['is_fritz']), use_container_width=True, height=800)
+                
+                st.dataframe(styled_df, use_container_width=True, height=800)
 
             with tab2:
-                # Karten-Code bleibt gleich
                 st.subheader("Live Positionen auf der Karte")
                 map_df = df[(df['lat'] != 0) & (df['lon'] != 0)]
                 if not map_df.empty:
@@ -206,7 +202,7 @@ def main():
                 st.plotly_chart(fig_dist, use_container_width=True)
 
     else:
-        st.warning("Es konnten keine verarbeitbaren Daten gefunden werden.")
+        st.warning("Es konnten keine verarbeitbaren Daten gefunden werden. Warten auf das nächste Update...")
 
     if auto_refresh:
         st.markdown('<meta http-equiv="refresh" content="45">', unsafe_allow_html=True)
