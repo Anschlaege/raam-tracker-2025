@@ -1,8 +1,7 @@
 """
-RAAM 2025 Live Dashboard - Version 29 (Final)
-- Stellt den Discord-Export wieder her.
-- Fügt Winddaten zur Discord-Nachricht hinzu.
-- Kombiniert alle Features in einem vollständigen, finalen Skript.
+RAAM 2025 Live Dashboard - Version 30 (Finale Version mit Höhenprofil)
+- Fügt einen interaktiven Höhenprofil-Plot mit Fritz' aktueller Position hinzu.
+- Enthält alle bisherigen Features und UI-Elemente.
 """
 
 import streamlit as st
@@ -29,24 +28,32 @@ def degrees_to_cardinal(d):
 
 @st.cache_data(ttl=3600)
 def load_and_process_gpx(file_path='raam_route.gpx'):
+    """Lädt und verarbeitet die GPX-Datei, um eine Distanz- und Höhenkarte zu erstellen."""
     try:
         with open(file_path, 'r') as gpx_file:
             gpx = gpxpy.parse(gpx_file)
         route_points = [{'lat': p.latitude, 'lon': p.longitude, 'ele': p.elevation} for p in gpx.tracks[0].segments[0].points]
-        distance_map, cumulative_distance_miles = [], 0.0
+        distance_map = []
+        cumulative_distance_miles = 0.0
         if len(route_points) > 1:
             for i in range(len(route_points)):
                 point_data = {'dist': cumulative_distance_miles, 'lat': route_points[i]['lat'], 'lon': route_points[i]['lon'], 'ele': route_points[i]['ele']}
                 if i > 0:
-                    p1 = (route_points[i-1]['lat'], route_points[i-1]['lon']); p2 = (route_points[i]['lat'], route_points[i]['lon'])
+                    p1, p2 = (route_points[i-1]['lat'], route_points[i-1]['lon']), (route_points[i]['lat'], route_points[i]['lon'])
                     cumulative_distance_miles += great_circle(p1, p2).miles
                     point_data['dist'] = cumulative_distance_miles
                 distance_map.append(point_data)
         total_distance = distance_map[-1]['dist'] if distance_map else 0
         return distance_map, total_distance
-    except Exception: return None, 0
+    except FileNotFoundError:
+        st.error(f"GPX-Datei nicht gefunden! Stelle sicher, dass '{file_path}' im Hauptverzeichnis deiner App liegt.")
+        return None, 0
+    except Exception as e:
+        st.error(f"Fehler beim Verarbeiten der GPX-Datei: {e}")
+        return None, 0
 
 def get_coords_for_distance(target_distance_miles, distance_map):
+    """Findet die GPS-Koordinaten für eine bestimmte Distanz entlang der Route durch Interpolation."""
     if not distance_map: return None
     p1 = distance_map[0]
     for point in distance_map:
@@ -60,6 +67,7 @@ def get_coords_for_distance(target_distance_miles, distance_map):
     return {'lat': lat, 'lon': lon}
 
 def get_current_gradient(current_distance_miles, distance_map):
+    """Berechnet die aktuelle Steigung."""
     if not distance_map: return "N/A"
     p1 = distance_map[0]
     for point in distance_map:
@@ -73,6 +81,7 @@ def get_current_gradient(current_distance_miles, distance_map):
     return f"{gradient:+.1f}%"
 
 def calculate_elevation_stats(current_distance_miles, distance_map):
+    """Berechnet absolvierte und verbleibende Höhenmeter."""
     if not distance_map: return {'climbed': 0, 'remaining': 0}
     total_gain = 0; climbed_gain = 0
     for i in range(1, len(distance_map)):
@@ -103,23 +112,14 @@ def get_local_time(lat, lon):
 
 def send_to_discord_as_file(webhook_url, df, weather_data):
     if df.empty: return {"status": "error", "message": "DataFrame ist leer."}
-    berlin_tz = timezone('Europe/Berlin')
-    now_berlin = datetime.now(berlin_tz)
-    days_de = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
-    day_name = days_de[now_berlin.weekday()]
+    berlin_tz = timezone('Europe/Berlin'); now_berlin = datetime.now(berlin_tz)
+    days_de = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]; day_name = days_de[now_berlin.weekday()]
     timestamp_str = now_berlin.strftime(f"{day_name}, %d.%m.%Y um %H:%M Uhr")
     weather_summary = "Wetterdaten für Fritz nicht verfügbar."
     if weather_data and 'current' in weather_data and all(v is not None for v in weather_data['current'].values()):
-        current = weather_data['current']
-        wind_dir = degrees_to_cardinal(current['wind_direction_10m'])
-        weather_summary = (f"Aktuelles Wetter an Fritz' Position: "
-                           f"{current['temperature_2m']}°C, "
-                           f"{current['wind_speed_10m']} km/h Wind aus {wind_dir}, "
-                           f"{current['relative_humidity_2m']}% Luftfeuchtigkeit, "
-                           f"{current['precipitation']}mm Niederschlag.")
-    content = (f"**RAAM Live-Export vom {timestamp_str} (Berliner Zeit)**\n\n"
-               f"🌦️ {weather_summary}\n\n"
-               f"Die vollständige Rangliste befindet sich im Anhang.")
+        current = weather_data['current']; wind_dir = degrees_to_cardinal(current['wind_direction_10m'])
+        weather_summary = (f"Aktuelles Wetter an Fritz' Position: {current['temperature_2m']}°C, {current['wind_speed_10m']} km/h Wind aus {wind_dir}, {current['relative_humidity_2m']}% Luftfeuchtigkeit, {current['precipitation']}mm Niederschlag.")
+    content = (f"**RAAM Live-Export vom {timestamp_str} (Berliner Zeit)**\n\n🌦️ {weather_summary}\n\nDie vollständige Rangliste befindet sich im Anhang.")
     csv_data = df.to_csv(index=False, encoding='utf-8')
     file_name = f"raam_live_export_{now_berlin.strftime('%Y%m%d_%H%M')}.csv"
     payload_json = {"content": content, "username": "RAAM Live Tracker", "avatar_url": "https://i.imgur.com/4M34hi2.png"}
@@ -183,6 +183,26 @@ def calculate_gaps(df):
     df['gap_to_fritz'] = gaps
     return df
 
+def create_elevation_plot(distance_map, fritz_distance, fritz_name):
+    """Erstellt einen Höhenprofil-Plot mit einer Markierung für Fritz' Position."""
+    if not distance_map: return None
+    
+    plot_df = pd.DataFrame(distance_map)
+    fig = px.area(plot_df, x="dist", y="ele", title="Höhenprofil der Gesamtstrecke")
+    
+    # Finde Fritz' Höhe für die Annotation, um sie korrekt zu platzieren
+    fritz_elevation = plot_df.iloc[(plot_df['dist'] - fritz_distance).abs().argsort()[:1]]['ele'].values[0]
+
+    fig.add_vline(x=fritz_distance, line_width=2, line_dash="dash", line_color="red")
+    fig.add_annotation(
+        x=fritz_distance, y=fritz_elevation + 100, # Positioniere die Annotation leicht über dem Punkt
+        text=f"📍 {fritz_name}", showarrow=True, arrowhead=1,
+        font=dict(size=12, color="black"), align="center",
+        bordercolor="black", borderwidth=1, bgcolor="rgba(255, 255, 255, 0.7)"
+    )
+    fig.update_layout(xaxis_title="Distanz (Meilen)", yaxis_title="Höhe (Meter)", showlegend=False)
+    return fig
+
 # --- HAUPTANWENDUNG (main) ---
 def main():
     st.set_page_config(page_title="RAAM 2025 Live Tracker - Fritz Geers", page_icon="🚴", layout="wide")
@@ -206,24 +226,12 @@ def main():
     st.success(f"{len(df)} Solo-Fahrer geladen!")
     st.markdown(f"*Aktualisiert: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}*")
     
-    # Discord-Button in der Sidebar (wird angezeigt, sobald Daten vorhanden sind)
     fritz_data = df[df['is_fritz']]
     weather_data_full = None
     if not fritz_data.empty:
         fritz = fritz_data.iloc[0]
         weather_data_full = get_weather_forecast(fritz.get('lat'), fritz.get('lon'))
-    try:
-        webhook_url = st.secrets["DISCORD_WEBHOOK_URL"]
-        st.sidebar.markdown("---"); st.sidebar.header("Export")
-        if st.sidebar.button("Export an Discord senden"):
-            with st.spinner("Sende an Discord..."):
-                result = send_to_discord_as_file(webhook_url, df, weather_data_full)
-                if result.get("status") == "success": st.sidebar.success(result.get("message"))
-                else: st.sidebar.error(result.get("message"))
-    except KeyError: pass
         
-    if not fritz_data.empty:
-        fritz = fritz_data.iloc[0]
         st.markdown("### ⭐ Fritz Geers Live Status")
         cols1 = st.columns(6)
         cols1[0].metric("Position", f"#{fritz['position']}")
@@ -272,7 +280,17 @@ def main():
                     if weather_24h and 'hourly' in weather_24h and len(weather_24h['hourly']['temperature_2m']) > 23:
                         st.metric("Temperatur", f"{weather_24h['hourly']['temperature_2m'][23]} °C", label_visibility="collapsed")
                         st.write(f"{weather_24h['hourly']['relative_humidity_2m'][23]}% / {weather_24h['hourly']['precipitation'][23]} mm")
-
+    
+    try:
+        webhook_url = st.secrets["DISCORD_WEBHOOK_URL"]
+        st.sidebar.markdown("---"); st.sidebar.header("Export")
+        if st.sidebar.button("Export an Discord senden"):
+            with st.spinner("Sende CSV an Discord..."):
+                result = send_to_discord_as_file(webhook_url, df, weather_data_full)
+                if result.get("status") == "success": st.sidebar.success(result.get("message"))
+                else: st.sidebar.error(result.get("message"))
+    except KeyError: pass
+            
     st.markdown("---")
     tab1, tab2, tab3 = st.tabs(["📊 Live Rangliste", "🗺️ Karte", "📈 Statistiken"])
     
@@ -292,6 +310,13 @@ def main():
             for _, r in map_df.iterrows():
                 folium.Marker([r['lat'], r['lon']], popup=f"<b>{r['name']}</b><br>Pos: #{r['position']}<br>Dist: {r['distance']:.1f} mi", tooltip=f"#{r['position']} {r['name']}", icon=folium.Icon(color='gold' if r['is_fritz'] else 'blue', icon='star' if r['is_fritz'] else 'bicycle', prefix='fa')).add_to(m)
             st_folium(m, height=600, width=None)
+        
+        if distance_map and not fritz_data.empty:
+            st.subheader("Höhenprofil der Strecke")
+            fritz = fritz_data.iloc[0]
+            elevation_fig = create_elevation_plot(distance_map, fritz['distance'], fritz['name'])
+            if elevation_fig:
+                st.plotly_chart(elevation_fig, use_container_width=True)
 
     with tab3:
         st.subheader("Top 10 nach Distanz")
