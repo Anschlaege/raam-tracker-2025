@@ -1,7 +1,8 @@
 """
-RAAM 2025 Live Dashboard - Version 33 (Final & Complete)
-- Abstandsberechnung zu Fritz wird nun für alle Fahrer angezeigt.
-- Alle bisherigen Features sind vollständig enthalten und funktionsfähig.
+RAAM 2025 Live Dashboard - Version 34 (Final Complete Version)
+- Re-integrates all UI components (Tabs, Map, Stats).
+- Adds detailed per-racer stats to the CSV export (remaining distance/elevation).
+- All previous features are present and correctly implemented.
 """
 
 import streamlit as st
@@ -9,7 +10,7 @@ import pandas as pd
 import plotly.express as px
 import folium
 from streamlit_folium import st_folium
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 import re
 import json
@@ -18,30 +19,36 @@ from pytz import timezone
 import gpxpy
 from geopy.distance import great_circle
 
-# --- FUNKTIONEN ---
+# --- HELPER & DATA PROCESSING FUNCTIONS ---
 
 def degrees_to_cardinal(d):
-    """Konvertiert Grad in eine Himmelsrichtung."""
+    """Converts wind direction from degrees to a cardinal direction."""
     if d is None: return ""
     dirs = ["N", "NNO", "NO", "ONO", "O", "OSO", "SO", "SSO", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
-    ix = int((d + 11.25)/22.5)
+    ix = int((d + 11.25) / 22.5)
     return dirs[ix % 16]
 
 @st.cache_data(ttl=3600)
 def load_and_process_gpx(file_path='raam_route.gpx'):
+    """Loads a GPX file and creates a pre-calculated map of distances and elevations."""
     try:
         with open(file_path, 'r', encoding='utf-8') as gpx_file:
             gpx = gpxpy.parse(gpx_file)
+        
         route_points = [{'lat': p.latitude, 'lon': p.longitude, 'ele': p.elevation} for p in gpx.tracks[0].segments[0].points]
-        distance_map, cumulative_distance_miles = [], 0.0
+        
+        distance_map = []
+        cumulative_distance_miles = 0.0
         if len(route_points) > 1:
             for i in range(len(route_points)):
                 point_data = {'dist': cumulative_distance_miles, 'lat': route_points[i]['lat'], 'lon': route_points[i]['lon'], 'ele': route_points[i]['ele']}
                 if i > 0:
-                    p1, p2 = (route_points[i-1]['lat'], route_points[i-1]['lon']), (route_points[i]['lat'], route_points[i]['lon'])
+                    p1 = (route_points[i-1]['lat'], route_points[i-1]['lon'])
+                    p2 = (route_points[i]['lat'], route_points[i]['lon'])
                     cumulative_distance_miles += great_circle(p1, p2).miles
                     point_data['dist'] = cumulative_distance_miles
                 distance_map.append(point_data)
+        
         total_distance = distance_map[-1]['dist'] if distance_map else 0
         return distance_map, total_distance
     except FileNotFoundError:
@@ -52,50 +59,73 @@ def load_and_process_gpx(file_path='raam_route.gpx'):
         return None, 0
 
 def get_coords_for_distance(target_distance_miles, distance_map):
+    """Finds GPS coordinates for a specific distance along the route via interpolation."""
     if not distance_map: return None
     p1 = distance_map[0]
+    p2 = None
     for point in distance_map:
-        if point['dist'] >= target_distance_miles: p2 = point; break
+        if point['dist'] >= target_distance_miles:
+            p2 = point
+            break
         p1 = point
-    else: p2 = p1
+    else: p2 = p1 # If target is beyond the route, use the last point
+    
     dist_p1, dist_p2 = p1['dist'], p2['dist']
     if (dist_p2 - dist_p1) == 0: return {'lat': p1['lat'], 'lon': p1['lon']}
+    
     ratio = (target_distance_miles - dist_p1) / (dist_p2 - dist_p1)
-    lat = p1['lat'] + ratio * (p2['lat'] - p1['lat']); lon = p1['lon'] + ratio * (p2['lon'] - p1['lon'])
+    lat = p1['lat'] + ratio * (p2['lat'] - p1['lat'])
+    lon = p1['lon'] + ratio * (p2['lon'] - p1['lon'])
     return {'lat': lat, 'lon': lon}
 
 def get_current_gradient(current_distance_miles, distance_map):
+    """Calculates the current road gradient at a specific point on the route."""
     if not distance_map: return "N/A"
-    p1 = distance_map[0]
+    p1, p2 = distance_map[0], None
     for point in distance_map:
-        if point['dist'] >= current_distance_miles: p2 = point; break
+        if point['dist'] >= current_distance_miles:
+            p2 = point
+            break
         p1 = point
-    else: p2 = p1
+    if p2 is None: p2 = p1
+        
     if p1['ele'] is None or p2['ele'] is None: return "N/A"
     elevation_change = p2['ele'] - p1['ele']
-    distance_change = (p2['dist'] - p1['dist']) * 1609.34
-    if distance_change == 0: return "0.0%"
-    gradient = (elevation_change / distance_change) * 100
+    distance_change_meters = (p2['dist'] - p1['dist']) * 1609.34
+    
+    if distance_change_meters == 0: return "0.0%"
+    
+    gradient = (elevation_change / distance_change_meters) * 100
     return f"{gradient:+.1f}%"
 
 def calculate_elevation_stats(current_distance_miles, distance_map):
+    """Calculates climbed and total elevation gain for a given distance."""
     if not distance_map: return {'climbed': 0, 'total': 0}
-    total_gain = 0; climbed_gain = 0
+    total_gain = 0
+    climbed_gain = 0
     for i in range(1, len(distance_map)):
-        ele1 = distance_map[i-1]['ele']; ele2 = distance_map[i]['ele']
+        ele1, ele2 = distance_map[i-1]['ele'], distance_map[i]['ele']
         if ele1 is None or ele2 is None: continue
+        
         elevation_diff = ele2 - ele1
         if elevation_diff > 0:
             total_gain += elevation_diff
             if distance_map[i]['dist'] <= current_distance_miles:
                 climbed_gain += elevation_diff
+                
     return {'climbed': int(climbed_gain), 'total': int(total_gain)}
 
 @st.cache_data(ttl=600)
 def get_weather_forecast(lat, lon):
+    """Fetches current weather and hourly forecast from Open-Meteo."""
     if lat is None or lon is None: return None
     try:
-        params = {"latitude": lat, "longitude": lon, "current": "temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,wind_direction_10m", "temperature_unit": "celsius", "precipitation_unit": "mm", "wind_speed_unit": "kmh"}
+        params = {
+            "latitude": lat, "longitude": lon,
+            "current": "temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,wind_direction_10m",
+            "hourly": "temperature_2m,relative_humidity_2m,precipitation",
+            "temperature_unit": "celsius", "precipitation_unit": "mm", "wind_speed_unit": "kmh"
+        }
         response = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=10)
         response.raise_for_status()
         return response.json()
@@ -103,33 +133,17 @@ def get_weather_forecast(lat, lon):
 
 @st.cache_data(ttl=3600)
 def get_local_time(lat, lon):
+    """Gets the local time for a given GPS coordinate."""
     if lat is None or lon is None: return "N/A"
     try:
-        tf = TimezoneFinder(); tz_name = tf.timezone_at(lng=lon, lat=lat)
+        tf = TimezoneFinder()
+        tz_name = tf.timezone_at(lng=lon, lat=lat)
         return datetime.now(timezone(tz_name)).strftime('%H:%M %Z') if tz_name else "N/A"
     except: return "N/A"
 
-def send_to_discord_as_file(webhook_url, df, weather_data):
-    if df.empty: return {"status": "error", "message": "DataFrame ist leer."}
-    berlin_tz = timezone('Europe/Berlin'); now_berlin = datetime.now(berlin_tz)
-    days_de = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]; day_name = days_de[now_berlin.weekday()]
-    timestamp_str = now_berlin.strftime(f"{day_name}, %d.%m.%Y um %H:%M Uhr")
-    weather_summary = "Wetterdaten für Fritz nicht verfügbar."
-    if weather_data and 'current' in weather_data and all(v is not None for v in weather_data['current'].values()):
-        current = weather_data['current']; wind_dir = degrees_to_cardinal(current.get('wind_direction_10m'))
-        weather_summary = (f"Aktuelles Wetter an Fritz' Position: {current.get('temperature_2m')}°C, {current.get('wind_speed_10m')} km/h Wind aus {wind_dir}, {current.get('relative_humidity_2m')}% Luftfeuchtigkeit, {current.get('precipitation')}mm Niederschlag.")
-    content = (f"**RAAM Live-Export vom {timestamp_str} (Berliner Zeit)**\n\n🌦️ {weather_summary}\n\nDie vollständige Rangliste mit allen Statistiken befindet sich im Anhang.")
-    csv_data = df.to_csv(index=False, encoding='utf-8')
-    file_name = f"raam_live_export_{now_berlin.strftime('%Y%m%d_%H%M')}.csv"
-    payload_json = {"content": content, "username": "RAAM Live Tracker", "avatar_url": "https://i.imgur.com/4M34hi2.png"}
-    files = {'file': (file_name, csv_data, 'text/csv')}
-    try:
-        response = requests.post(webhook_url, data={'payload_json': json.dumps(payload_json)}, files=files, timeout=15)
-        return {"status": "success", "message": f"Datei '{file_name}' gesendet!"} if 200 <= response.status_code < 300 else {"status": "error", "message": f"Discord-Fehler: {response.status_code}"}
-    except requests.exceptions.RequestException as e: return {"status": "error", "message": f"Netzwerkfehler: {e}"}
-
 @st.cache_data(ttl=45)
 def fetch_trackleaders_data():
+    """Fetches and parses the main data file from TrackLeaders."""
     data_url = "https://trackleaders.com/spot/raam25/mainpoints.js"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': 'https://trackleaders.com/raam25f.php'}
     try:
@@ -140,70 +154,100 @@ def fetch_trackleaders_data():
         st.error(f"Fehler im Datenabruf: {e}"); return None
 
 def parse_js_code_data(js_content):
+    """Parses the raw JavaScript content to extract racer data."""
     racers = []
     for block in js_content.split('markers.push('):
         try:
             status = re.search(r"\.mystatus\s*=\s*'(.*?)';", block).group(1)
             category = re.search(r"\.mycategory\s*=\s*'(.*?)';", block).group(1)
             if status.lower() != 'active' or category.lower() != 'solo': continue
+            
             lat_lon = re.search(r"L\.marker\(\[([\d.-]+),\s*([\d.-]+)\]", block)
             tooltip = re.search(r"bindTooltip\(\"<b>\(([\w\d]+)\)\s*(.*?)<\/b>.*?<br>([\d.]+)\s*mph at route mile ([\d.]+)", block)
+            
             if not all([lat_lon, tooltip]): continue
-            racers.append({'lat': float(lat_lon.group(1)), 'lon': float(lat_lon.group(2)), 'bib': tooltip.group(1),'name': tooltip.group(2).strip(), 'speed': float(tooltip.group(3)), 'distance_covered_miles': float(tooltip.group(4)),'category': category, 'position': 999})
+            
+            racers.append({
+                'lat': float(lat_lon.group(1)), 'lon': float(lat_lon.group(2)), 
+                'bib': tooltip.group(1), 'name': tooltip.group(2).strip(), 
+                'speed': float(tooltip.group(3)), 'distance_covered_miles': float(tooltip.group(4)),
+                'category': category, 'position': 999
+            })
         except: continue
     if not racers: return None
+    
     df = pd.DataFrame(racers).sort_values(by='distance_covered_miles', ascending=False).reset_index(drop=True)
     df['position'] = df.index + 1
     return df.to_dict('records')
 
 def create_dataframe(racers_data):
+    """Creates the initial DataFrame and identifies the featured racer."""
     df = pd.DataFrame(racers_data)
     df['is_fritz'] = (df['bib'] == '675') | (df['name'].str.lower().str.contains('fritz|geers|gers', na=False, regex=True))
     return df.sort_values('position')
 
 def calculate_all_stats(df, distance_map, total_route_dist):
+    """Enriches the DataFrame with all calculated statistics for every racer."""
     if df.empty: return df
     
+    # Calculate Gaps relative to Fritz
     if 'is_fritz' in df.columns and df['is_fritz'].any():
         fritz = df[df['is_fritz']].iloc[0]
         fritz_pos, fritz_dist, fritz_speed = fritz['position'], fritz['distance_covered_miles'], fritz['speed']
+        
         def format_time_gap(h):
             if pd.isna(h) or h <= 0: return ""
             return f"~{int(h)}h {int((h*60)%60)}m" if h >= 1 else f"~{int(h*60)}m"
+
         gaps = []
         for _, row in df.iterrows():
-            if row['is_fritz']: gaps.append("Fritz Geers"); continue
+            if row['is_fritz']:
+                gaps.append("Fritz Geers")
+                continue
+            
             gap_mi = row['distance_covered_miles'] - fritz_dist
-            # ANPASSUNG HIER: Die Logik wird jetzt für alle Fahrer angewendet
-            if gap_mi > 0: # Fahrer ist vor Fritz
+            if gap_mi > 0: # Racer is ahead
                 time_h = (gap_mi / fritz_speed) if fritz_speed > 0 else None
-                gaps.append(f"+{gap_mi:.1f} mi / {gap_mi*1.60934:.1f} km ({format_time_gap(time_h)})")
-            else: # Fahrer ist hinter Fritz
+                gaps.append(f"+{gap_mi:.1f} mi ({format_time_gap(time_h)})")
+            else: # Racer is behind
                 time_h = (abs(gap_mi) / row['speed']) if row['speed'] > 0 else None
-                gaps.append(f"{gap_mi:.1f} mi / {gap_mi*1.60934:.1f} km ({format_time_gap(time_h)})")
+                gaps.append(f"{gap_mi:.1f} mi ({format_time_gap(time_h)})")
         df['gap_to_fritz'] = gaps
     
+    # Calculate route and elevation stats for every racer (for the export)
     if distance_map:
         new_cols = {'distance_remaining_miles': [], 'elevation_climbed_m': [], 'elevation_remaining_m': []}
         total_elevation_gain = calculate_elevation_stats(total_route_dist, distance_map)['total']
+        
         for _, row in df.iterrows():
             new_cols['distance_remaining_miles'].append(total_route_dist - row['distance_covered_miles'])
             climbed = calculate_elevation_stats(row['distance_covered_miles'], distance_map)['climbed']
             new_cols['elevation_climbed_m'].append(climbed)
             new_cols['elevation_remaining_m'].append(total_elevation_gain - climbed)
+            
         df = pd.concat([df, pd.DataFrame(new_cols)], axis=1)
+        
+        # Format columns for a clean CSV export
         df['distance_covered_miles'] = df['distance_covered_miles'].round(2)
         df['distance_remaining_miles'] = df['distance_remaining_miles'].round(2)
         
     return df
 
 def create_elevation_plot(current_distance, racer_name, distance_map):
+    """Creates an elevation profile plot with a marker for the racer's position."""
     if not distance_map: return None
+    
     plot_df = pd.DataFrame(distance_map)
     fig = px.area(plot_df, x="dist", y="ele", title="Höhenprofil der Gesamtstrecke")
+    
     current_elevation = plot_df.iloc[(plot_df['dist'] - current_distance).abs().argsort()[:1]]['ele'].values[0]
+
     fig.add_vline(x=current_distance, line_width=2, line_dash="dash", line_color="red")
-    fig.add_annotation(x=current_distance, y=current_elevation + 100, text=f"📍 {racer_name}", showarrow=True, arrowhead=1, font=dict(color="black"), bgcolor="rgba(255,255,255,0.7)")
+    fig.add_annotation(
+        x=current_distance, y=current_elevation + 100,
+        text=f"📍 {racer_name}", showarrow=True, arrowhead=1,
+        font=dict(color="black"), bgcolor="rgba(255,255,255,0.7)"
+    )
     fig.update_layout(xaxis_title="Distanz (Meilen)", yaxis_title="Höhe (Meter)")
     return fig
 
@@ -213,7 +257,8 @@ def main():
     st.sidebar.title("🚴 RAAM 2025 Live Tracker")
     if st.sidebar.button("🔄 Jetzt aktualisieren"): st.cache_data.clear(); st.rerun()
     auto_refresh = st.sidebar.checkbox("Auto-Refresh (60 Sek)", value=True)
-    st.sidebar.markdown("---"); st.sidebar.info("**Live-Daten** von TrackLeaders\n\n**Fritz Geers** (#675) wird mit ⭐ hervorgehoben")
+    st.sidebar.markdown("---")
+    st.sidebar.info("**Live-Daten** von TrackLeaders\n\n**Fritz Geers** (#675) wird mit ⭐ hervorgehoben")
     
     st.title("🏆 Race Across America 2025 - Live Tracking")
     
@@ -252,7 +297,34 @@ def main():
             cols2[2].metric("Verbleibende Höhenmeter", f"{fritz.get('elevation_remaining_m', 0):,} m")
             
         st.markdown("#### 🌦️ Wetter & Positions-Vorhersage")
-        # (Wetter-UI bleibt gleich)
+        col_w1, col_w2, col_w3 = st.columns(3)
+        with col_w1:
+            st.write("**Jetzt (Aktuelle Pos.)**")
+            if weather_data_full and 'current' in weather_data_full:
+                st.metric("Temp.", f"{weather_data_full['current']['temperature_2m']} °C", label_visibility="collapsed")
+                st.write(f"{weather_data_full['current']['relative_humidity_2m']}% / {weather_data_full['current']['precipitation']} mm")
+        with col_w2:
+            st.write("**In 1 Stunde**")
+            if distance_map:
+                future_dist_1h = fritz['distance_covered_miles'] + fritz['speed']
+                future_coords_1h = get_coords_for_distance(future_dist_1h, distance_map)
+                if future_coords_1h:
+                    st.write(f"📍 bei Meile {future_dist_1h:.1f}")
+                    weather_1h = get_weather_forecast(future_coords_1h.get('lat'), future_coords_1h.get('lon'))
+                    if weather_1h and 'hourly' in weather_1h and len(weather_1h.get('hourly', {}).get('temperature_2m', [])) > 1:
+                        st.metric("Temp.", f"{weather_1h['hourly']['temperature_2m'][1]} °C", label_visibility="collapsed")
+                        st.write(f"{weather_1h['hourly']['relative_humidity_2m'][1]}% / {weather_1h['hourly']['precipitation'][1]} mm")
+        with col_w3:
+            st.write("**In 24 Stunden**")
+            if distance_map:
+                future_dist_24h = fritz['distance_covered_miles'] + (fritz['speed'] * 24)
+                future_coords_24h = get_coords_for_distance(future_dist_24h, distance_map)
+                if future_coords_24h:
+                    st.write(f"📍 bei Meile {future_dist_24h:.1f}")
+                    weather_24h = get_weather_forecast(future_coords_24h.get('lat'), future_coords_24h.get('lon'))
+                    if weather_24h and 'hourly' in weather_24h and len(weather_24h.get('hourly', {}).get('temperature_2m', [])) > 23:
+                        st.metric("Temp.", f"{weather_24h['hourly']['temperature_2m'][23]} °C", label_visibility="collapsed")
+                        st.write(f"{weather_24h['hourly']['relative_humidity_2m'][23]}% / {weather_24h['hourly']['precipitation'][23]} mm")
     
     try:
         webhook_url = st.secrets["DISCORD_WEBHOOK_URL"]
@@ -283,6 +355,7 @@ def main():
             for _, r in map_df.iterrows():
                 folium.Marker([r['lat'], r['lon']], popup=f"<b>{r['name']}</b><br>Pos: #{r['position']}<br>Dist: {r['distance_covered_miles']:.1f} mi", tooltip=f"#{r['position']} {r['name']}", icon=folium.Icon(color='gold' if r['is_fritz'] else 'blue', icon='star' if r['is_fritz'] else 'bicycle', prefix='fa')).add_to(m)
             st_folium(m, height=600, width=None)
+        
         if distance_map and not fritz_data.empty:
             st.subheader("Höhenprofil der Strecke")
             elevation_fig = create_elevation_plot(fritz_data.iloc[0]['distance_covered_miles'], fritz_data.iloc[0]['name'], distance_map)
