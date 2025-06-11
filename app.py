@@ -1,8 +1,8 @@
 """
-RAAM 2025 Live Dashboard - Version 31 (Erweiterter Export)
-- Fügt verbleibende Distanz und Höhenmeter-Statistiken für jeden Fahrer hinzu.
-- Diese neuen Spalten sind automatisch im CSV-Export enthalten.
-- Alle bisherigen Features und UI-Elemente bleiben erhalten.
+RAAM 2025 Live Dashboard - Version 32 (Final & Complete)
+- Behebt den `NameError` durch Hinzufügen der `create_elevation_plot` Funktion.
+- Erweitert den CSV-Export um zurückgelegte/verbleibende Distanz und Höhenmeter.
+- Alle bisherigen Features sind vollständig enthalten und funktionsfähig.
 """
 
 import streamlit as st
@@ -29,10 +29,8 @@ def degrees_to_cardinal(d):
 
 @st.cache_data(ttl=3600)
 def load_and_process_gpx(file_path='raam_route.gpx'):
-    """Lädt und verarbeitet die GPX-Datei, um eine Distanz- und Höhenkarte zu erstellen."""
     try:
-        with open(file_path, 'r') as gpx_file:
-            gpx = gpxpy.parse(gpx_file)
+        with open(file_path, 'r') as gpx_file: gpx = gpxpy.parse(gpx_file)
         route_points = [{'lat': p.latitude, 'lon': p.longitude, 'ele': p.elevation} for p in gpx.tracks[0].segments[0].points]
         distance_map, cumulative_distance_miles = [], 0.0
         if len(route_points) > 1:
@@ -45,12 +43,8 @@ def load_and_process_gpx(file_path='raam_route.gpx'):
                 distance_map.append(point_data)
         total_distance = distance_map[-1]['dist'] if distance_map else 0
         return distance_map, total_distance
-    except FileNotFoundError:
-        st.error(f"GPX-Datei nicht gefunden! Stelle sicher, dass '{file_path}' im Hauptverzeichnis deiner App liegt.")
-        return None, 0
-    except Exception as e:
-        st.error(f"Fehler beim Verarbeiten der GPX-Datei: {e}")
-        return None, 0
+    except FileNotFoundError: st.error(f"GPX-Datei nicht gefunden! Stelle sicher, dass '{file_path}' im Hauptverzeichnis deiner App liegt."); return None, 0
+    except Exception as e: st.error(f"Fehler beim Verarbeiten der GPX-Datei: {e}"); return None, 0
 
 def get_coords_for_distance(target_distance_miles, distance_map):
     if not distance_map: return None
@@ -147,10 +141,10 @@ def parse_js_code_data(js_content):
             lat_lon = re.search(r"L\.marker\(\[([\d.-]+),\s*([\d.-]+)\]", block)
             tooltip = re.search(r"bindTooltip\(\"<b>\(([\w\d]+)\)\s*(.*?)<\/b>.*?<br>([\d.]+)\s*mph at route mile ([\d.]+)", block)
             if not all([lat_lon, tooltip]): continue
-            racers.append({'lat': float(lat_lon.group(1)), 'lon': float(lat_lon.group(2)), 'bib': tooltip.group(1),'name': tooltip.group(2).strip(), 'speed': float(tooltip.group(3)), 'distance': float(tooltip.group(4)),'category': category, 'position': 999})
+            racers.append({'lat': float(lat_lon.group(1)), 'lon': float(lat_lon.group(2)), 'bib': tooltip.group(1),'name': tooltip.group(2).strip(), 'speed': float(tooltip.group(3)), 'distance_covered_miles': float(tooltip.group(4)),'category': category, 'position': 999})
         except: continue
     if not racers: return None
-    df = pd.DataFrame(racers).sort_values(by='distance', ascending=False).reset_index(drop=True)
+    df = pd.DataFrame(racers).sort_values(by='distance_covered_miles', ascending=False).reset_index(drop=True)
     df['position'] = df.index + 1
     return df.to_dict('records')
 
@@ -160,20 +154,17 @@ def create_dataframe(racers_data):
     return df.sort_values('position')
 
 def calculate_all_stats(df, distance_map, total_route_dist):
-    """Reichert den DataFrame mit allen berechneten Statistiken an."""
     if df.empty: return df
-
-    # --- Lücke zu Fritz ---
     if 'is_fritz' in df.columns and df['is_fritz'].any():
         fritz = df[df['is_fritz']].iloc[0]
-        fritz_pos, fritz_dist, fritz_speed = fritz['position'], fritz['distance'], fritz['speed']
+        fritz_pos, fritz_dist, fritz_speed = fritz['position'], fritz['distance_covered_miles'], fritz['speed']
         def format_time_gap(h):
             if pd.isna(h) or h <= 0: return ""
             return f"~{int(h)}h {int((h*60)%60)}m" if h >= 1 else f"~{int(h*60)}m"
         gaps = []
         for _, row in df.iterrows():
             if row['is_fritz']: gaps.append("Fritz Geers"); continue
-            gap_mi = row['distance'] - fritz_dist
+            gap_mi = row['distance_covered_miles'] - fritz_dist
             if row['position'] < fritz_pos:
                 time_h = (gap_mi / fritz_speed) if fritz_speed > 0 else None
                 gaps.append(f"+{gap_mi:.1f} mi / {gap_mi*1.60934:.1f} km ({format_time_gap(time_h)})")
@@ -183,18 +174,31 @@ def calculate_all_stats(df, distance_map, total_route_dist):
             else: gaps.append("")
         df['gap_to_fritz'] = gaps
     
-    # --- Verbleibende Distanz & Höhenmeter für JEDEN Fahrer ---
     if distance_map:
-        new_cols = {'remaining_miles': [], 'elevation_climbed_m': [], 'elevation_remaining_m': []}
+        new_cols = {'distance_remaining_miles': [], 'elevation_climbed_m': [], 'elevation_remaining_m': []}
         total_elevation_gain = calculate_elevation_stats(total_route_dist, distance_map)['total']
         for _, row in df.iterrows():
-            new_cols['remaining_miles'].append(total_route_dist - row['distance'])
-            climbed = calculate_elevation_stats(row['distance'], distance_map)['climbed']
+            new_cols['distance_remaining_miles'].append(total_route_dist - row['distance_covered_miles'])
+            climbed = calculate_elevation_stats(row['distance_covered_miles'], distance_map)['climbed']
             new_cols['elevation_climbed_m'].append(climbed)
             new_cols['elevation_remaining_m'].append(total_elevation_gain - climbed)
         df = pd.concat([df, pd.DataFrame(new_cols)], axis=1)
-
+        # Formatiere die Spalten auf 2 Nachkommastellen
+        df['distance_covered_miles'] = df['distance_covered_miles'].round(2)
+        df['distance_remaining_miles'] = df['distance_remaining_miles'].round(2)
+        
     return df
+
+def create_elevation_plot(current_distance, racer_name, distance_map):
+    """Erstellt einen Höhenprofil-Plot mit einer Markierung für die Position."""
+    if not distance_map: return None
+    plot_df = pd.DataFrame(distance_map)
+    fig = px.area(plot_df, x="dist", y="ele", title="Höhenprofil der Gesamtstrecke")
+    current_elevation = plot_df.iloc[(plot_df['dist'] - current_distance).abs().argsort()[:1]]['ele'].values[0]
+    fig.add_vline(x=current_distance, line_width=2, line_dash="dash", line_color="red")
+    fig.add_annotation(x=current_distance, y=current_elevation + 100, text=f"📍 {racer_name}", showarrow=True, arrowhead=1)
+    fig.update_layout(xaxis_title="Distanz (Meilen)", yaxis_title="Höhe (Meter)")
+    return fig
 
 # --- HAUPTANWENDUNG (main) ---
 def main():
@@ -228,28 +232,54 @@ def main():
         st.markdown("### ⭐ Fritz Geers Live Status")
         cols1 = st.columns(6)
         cols1[0].metric("Position", f"#{fritz['position']}")
-        cols1[1].metric("Distanz", f"{fritz['distance']:.1f} mi")
+        cols1[1].metric("Distanz", f"{fritz['distance_covered_miles']:.1f} mi")
         cols1[2].metric("Geschwindigkeit", f"{fritz['speed']:.1f} mph")
         cols1[3].metric("Startnummer", f"#{fritz['bib']}")
         cols1[4].metric("Lokale Zeit", get_local_time(fritz.get('lat'), fritz.get('lon')))
-        if distance_map:
-            cols1[5].metric("Steigung", get_current_gradient(fritz['distance'], distance_map))
+        if distance_map: cols1[5].metric("Steigung", get_current_gradient(fritz['distance_covered_miles'], distance_map))
         
         if distance_map:
             st.markdown("#### 🏁 Strecke & Höhenprofil")
             cols2 = st.columns(3)
-            cols2[0].metric("Verbleibende Distanz", f"{fritz.get('remaining_miles', 0):.1f} mi")
+            cols2[0].metric("Verbleibende Distanz", f"{fritz.get('distance_remaining_miles', 0):.1f} mi")
             cols2[1].metric("Absolvierte Höhenmeter", f"{fritz.get('elevation_climbed_m', 0):,} m")
             cols2[2].metric("Verbleibende Höhenmeter", f"{fritz.get('elevation_remaining_m', 0):,} m")
             
         st.markdown("#### 🌦️ Wetter & Positions-Vorhersage")
-        # ... (Wetter-UI bleibt gleich)
+        col_weather1, col_weather2, col_weather3 = st.columns(3)
+        with col_weather1:
+            st.write("**Jetzt (Aktuelle Pos.)**")
+            if weather_data_full and 'current' in weather_data_full:
+                st.metric("Temperatur", f"{weather_data_full['current']['temperature_2m']} °C", label_visibility="collapsed")
+                st.write(f"{weather_data_full['current']['relative_humidity_2m']}% / {weather_data_full['current']['precipitation']} mm")
+        with col_weather2:
+            st.write("**In 1 Stunde**")
+            if distance_map:
+                future_dist_1h = fritz['distance_covered_miles'] + fritz['speed']
+                future_coords_1h = get_coords_for_distance(future_dist_1h, distance_map)
+                if future_coords_1h:
+                    st.write(f"📍 bei Meile {future_dist_1h:.1f}")
+                    weather_1h = get_weather_forecast(future_coords_1h.get('lat'), future_coords_1h.get('lon'))
+                    if weather_1h and 'hourly' in weather_1h and len(weather_1h['hourly']['temperature_2m']) > 1:
+                        st.metric("Temperatur", f"{weather_1h['hourly']['temperature_2m'][1]} °C", label_visibility="collapsed")
+                        st.write(f"{weather_1h['hourly']['relative_humidity_2m'][1]}% / {weather_1h['hourly']['precipitation'][1]} mm")
+        with col_weather3:
+            st.write("**In 24 Stunden**")
+            if distance_map:
+                future_dist_24h = fritz['distance_covered_miles'] + (fritz['speed'] * 24)
+                future_coords_24h = get_coords_for_distance(future_dist_24h, distance_map)
+                if future_coords_24h:
+                    st.write(f"📍 bei Meile {future_dist_24h:.1f}")
+                    weather_24h = get_weather_forecast(future_coords_24h.get('lat'), future_coords_24h.get('lon'))
+                    if weather_24h and 'hourly' in weather_24h and len(weather_24h['hourly']['temperature_2m']) > 23:
+                        st.metric("Temperatur", f"{weather_24h['hourly']['temperature_2m'][23]} °C", label_visibility="collapsed")
+                        st.write(f"{weather_24h['hourly']['relative_humidity_2m'][23]}% / {weather_24h['hourly']['precipitation'][23]} mm")
     
     try:
         webhook_url = st.secrets["DISCORD_WEBHOOK_URL"]
         st.sidebar.markdown("---"); st.sidebar.header("Export")
         if st.sidebar.button("Export an Discord senden"):
-            with st.spinner("Sende CSV an Discord..."):
+            with st.spinner("Sende an Discord..."):
                 result = send_to_discord_as_file(webhook_url, df, weather_data_full)
                 if result.get("status") == "success": st.sidebar.success(result.get("message"))
                 else: st.sidebar.error(result.get("message"))
@@ -260,25 +290,32 @@ def main():
     
     with tab1:
         st.subheader("Live Rangliste - Solo Kategorie")
-        display_cols = ['position', 'bib', 'name', 'distance', 'speed', 'gap_to_fritz', 'is_fritz']
+        display_cols = ['position', 'bib', 'name', 'distance_covered_miles', 'speed', 'gap_to_fritz', 'is_fritz']
         display_df = df.reindex(columns=display_cols, fill_value="")
-        display_df.rename(columns={'position': 'Pos', 'bib': 'Nr.', 'name': 'Name', 'distance': 'Distanz (mi)', 'speed': 'Geschw. (mph)', 'gap_to_fritz': 'Abstand zu Fritz'}, inplace=True)
+        display_df.rename(columns={'position': 'Pos', 'bib': 'Nr.', 'name': 'Name', 'distance_covered_miles': 'Distanz (mi)', 'speed': 'Geschw. (mph)', 'gap_to_fritz': 'Abstand zu Fritz'}, inplace=True)
         def highlight_fritz(row): return ['background-color: #ffd700'] * len(row) if row.is_fritz else [''] * len(row)
         st.dataframe(display_df.style.apply(highlight_fritz, axis=1), use_container_width=True, height=800, column_config={"is_fritz": None})
 
     with tab2:
         st.subheader("Live Positionen auf der Karte")
-        # ... (Karten-Code bleibt gleich)
+        map_df = df[df['lat'] != 0]
+        if not map_df.empty:
+            m = folium.Map(location=[map_df['lat'].mean(), map_df['lon'].mean()], zoom_start=6)
+            for _, r in map_df.iterrows():
+                folium.Marker([r['lat'], r['lon']], popup=f"<b>{r['name']}</b><br>Pos: #{r['position']}<br>Dist: {r['distance_covered_miles']:.1f} mi", tooltip=f"#{r['position']} {r['name']}", icon=folium.Icon(color='gold' if r['is_fritz'] else 'blue', icon='star' if r['is_fritz'] else 'bicycle', prefix='fa')).add_to(m)
+            st_folium(m, height=600, width=None)
         
         if distance_map and not fritz_data.empty:
             st.subheader("Höhenprofil der Strecke")
-            elevation_fig = create_elevation_plot(fritz.get('distance', 0), fritz.get('name', ''), distance_map)
-            if elevation_fig:
-                st.plotly_chart(elevation_fig, use_container_width=True)
+            elevation_fig = create_elevation_plot(fritz_data.iloc[0]['distance_covered_miles'], fritz_data.iloc[0]['name'], distance_map)
+            if elevation_fig: st.plotly_chart(elevation_fig, use_container_width=True)
 
     with tab3:
         st.subheader("Top 10 nach Distanz")
-        # ... (Statistik-Code bleibt gleich)
+        top10 = df.head(10).sort_values('distance_covered_miles', ascending=True)
+        fig = px.bar(top10, y='name', x='distance_covered_miles', orientation='h', text='distance_covered_miles', labels={'name': 'Fahrer', 'distance_covered_miles': 'Distanz (Meilen)'})
+        fig.update_traces(texttemplate='%{text:.1f} mi', textposition='outside')
+        st.plotly_chart(fig, use_container_width=True)
 
     if auto_refresh:
         st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
