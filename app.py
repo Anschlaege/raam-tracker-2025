@@ -1,7 +1,8 @@
 """
-RAAM 2025 Live Dashboard - Version 28 (Finale Version)
-- Stellt die Wetter- und Prognose-Anzeige wieder her.
-- Enthält alle Features: Steigung, verbleibende Distanz, Höhenmeter, lokale Zeit, Discord-Export.
+RAAM 2025 Live Dashboard - Version 28 (Finale, vollständige Version)
+- Stellt die UI-Anzeige für Rangliste, Karte und Statistiken wieder her.
+- Enthält alle Features: GPX-basierte Wettervorhersage, lokale Zeit, Steigung,
+  verbleibende Distanz/Höhenmeter und Discord-Export.
 """
 
 import streamlit as st
@@ -144,6 +145,27 @@ def create_dataframe(racers_data):
     df['is_fritz'] = (df['bib'] == '675') | (df['name'].str.lower().str.contains('fritz|geers|gers', na=False, regex=True))
     return df.sort_values('position')
 
+def calculate_gaps(df):
+    if df.empty or not df['is_fritz'].any(): return df
+    fritz = df[df['is_fritz']].iloc[0]
+    fritz_pos, fritz_dist, fritz_speed = fritz['position'], fritz['distance'], fritz['speed']
+    def format_time_gap(h):
+        if pd.isna(h) or h <= 0: return ""
+        return f"~{int(h)}h {int((h*60)%60)}m" if h >= 1 else f"~{int(h*60)}m"
+    gaps = []
+    for _, row in df.iterrows():
+        if row['is_fritz']: gaps.append("Fritz Geers"); continue
+        gap_mi = row['distance'] - fritz_dist
+        if row['position'] < fritz_pos:
+            time_h = (gap_mi / fritz_speed) if fritz_speed > 0 else None
+            gaps.append(f"+{gap_mi:.1f} mi / {gap_mi*1.60934:.1f} km ({format_time_gap(time_h)})")
+        elif row['position'] <= fritz_pos + 5:
+            time_h = (abs(gap_mi) / row['speed']) if row['speed'] > 0 else None
+            gaps.append(f"{gap_mi:.1f} mi / {gap_mi*1.60934:.1f} km ({format_time_gap(time_h)})")
+        else: gaps.append("")
+    df['gap_to_fritz'] = gaps
+    return df
+
 # --- HAUPTANWENDUNG (main) ---
 def main():
     st.set_page_config(page_title="RAAM 2025 Live Tracker - Fritz Geers", page_icon="🚴", layout="wide")
@@ -162,6 +184,8 @@ def main():
         st.warning("Momentan konnten keine verarbeitbaren Live-Daten gefunden werden."); return
 
     df = create_dataframe(racers_data)
+    df = calculate_gaps(df)
+    
     st.success(f"{len(df)} Solo-Fahrer geladen!")
     st.markdown(f"*Aktualisiert: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}*")
     
@@ -188,7 +212,6 @@ def main():
             cols2[1].metric("Absolvierte Höhenmeter", f"{elevation_stats['climbed']:,} m")
             cols2[2].metric("Verbleibende Höhenmeter", f"{elevation_stats['remaining']:,} m")
             
-        # WETTER-ANZEIGE WIEDERHERGESTELLT
         st.markdown("#### 🌦️ Wetter & Positions-Vorhersage")
         col_weather1, col_weather2, col_weather3 = st.columns(3)
         with col_weather1:
@@ -221,19 +244,32 @@ def main():
                         st.write(f"{weather_24h['hourly']['relative_humidity_2m'][23]}% / {weather_24h['hourly']['precipitation'][23]} mm")
     
     st.markdown("---")
+    # WIEDERHERGESTELLTE UI-TABS
     tab1, tab2, tab3 = st.tabs(["📊 Live Rangliste", "🗺️ Karte", "📈 Statistiken"])
     
     with tab1:
-        #... Code für Rangliste
-        pass
+        st.subheader("Live Rangliste - Solo Kategorie")
+        display_cols = ['position', 'bib', 'name', 'distance', 'speed', 'gap_to_fritz', 'is_fritz']
+        display_df = df.reindex(columns=display_cols, fill_value="")
+        display_df.rename(columns={'position': 'Pos', 'bib': 'Nr.', 'name': 'Name', 'distance': 'Distanz (mi)', 'speed': 'Geschw. (mph)', 'gap_to_fritz': 'Abstand zu Fritz'}, inplace=True)
+        def highlight_fritz(row): return ['background-color: #ffd700'] * len(row) if row.is_fritz else [''] * len(row)
+        st.dataframe(display_df.style.apply(highlight_fritz, axis=1), use_container_width=True, height=800, column_config={"is_fritz": None})
 
     with tab2:
-        #... Code für Karte
-        pass
+        st.subheader("Live Positionen auf der Karte")
+        map_df = df[df['lat'] != 0]
+        if not map_df.empty:
+            m = folium.Map(location=[map_df['lat'].mean(), map_df['lon'].mean()], zoom_start=6)
+            for _, r in map_df.iterrows():
+                folium.Marker([r['lat'], r['lon']], popup=f"<b>{r['name']}</b><br>Pos: #{r['position']}<br>Dist: {r['distance']:.1f} mi", tooltip=f"#{r['position']} {r['name']}", icon=folium.Icon(color='gold' if r['is_fritz'] else 'blue', icon='star' if r['is_fritz'] else 'bicycle', prefix='fa')).add_to(m)
+            st_folium(m, height=600, width=None)
 
     with tab3:
-        #... Code für Statistiken
-        pass
+        st.subheader("Top 10 nach Distanz")
+        top10 = df.head(10).sort_values('distance', ascending=True)
+        fig = px.bar(top10, y='name', x='distance', orientation='h', text='distance', labels={'name': 'Fahrer', 'distance': 'Distanz (Meilen)'})
+        fig.update_traces(texttemplate='%{text:.1f} mi', textposition='outside')
+        st.plotly_chart(fig, use_container_width=True)
 
     if auto_refresh:
         st.markdown('<meta http-equiv="refresh" content="60">', unsafe_allow_html=True)
